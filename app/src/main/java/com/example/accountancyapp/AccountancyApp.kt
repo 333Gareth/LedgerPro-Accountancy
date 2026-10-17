@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -22,6 +23,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -33,11 +35,9 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.Locale
 
-// -------------------------------------------------------------
-// UK Models & Enums
-// -------------------------------------------------------------
 enum class TipCategory(val title: String, val icon: ImageVector) {
-    ALL("All", Icons.Default.AllInclusive),
+    ALL("All Tips", Icons.Default.AllInclusive),
+    TAILORED("For Your Report", Icons.Default.AutoFixHigh),
     TAX("HMRC & Corp Tax", Icons.Default.ReceiptLong),
     BOOKKEEPING("Bookkeeping", Icons.Default.MenuBook),
     EXCEL("Excel Hacks", Icons.Default.GridOn),
@@ -51,14 +51,29 @@ data class AccountancyTip(
     val summary: String,
     val deepDive: String,
     val category: TipCategory,
-    val impact: String
+    val impact: String,
+    val triggerCondition: (BalanceSheetReport) -> Boolean = { false }
 )
 
 data class CheatSheetEntry(
+    val id: String,
     val transaction: String,
     val debit: String,
     val credit: String,
-    val explanation: String
+    val explanation: String,
+    val isSuggestedForReport: Boolean = false,
+    val suggestedContext: String = ""
+)
+
+data class ActionTask(
+    val id: String,
+    val title: String,
+    val urgency: String,
+    val urgencyColor: Color,
+    val rationale: String,
+    val procedure: String,
+    val statutoryReference: String,
+    var isDone: Boolean = false
 )
 
 data class BalanceSheetReport(
@@ -73,7 +88,7 @@ data class BalanceSheetReport(
     val shareholderFunds: Double = 0.0,
     val turnover: Double = 0.0,
     val netProfitBeforeTax: Double = 0.0,
-    val rawFileName: String = ""
+    val rawFileName: String = "UK FRS Sample"
 )
 
 data class FinancialHealthMetric(
@@ -85,6 +100,7 @@ data class FinancialHealthMetric(
 )
 
 data class AdvisoryRecommendation(
+    val id: String,
     val title: String,
     val severity: String,
     val color: Color,
@@ -92,26 +108,25 @@ data class AdvisoryRecommendation(
     val actionItem: String
 )
 
-// -------------------------------------------------------------
-// UK Knowledge Base (HMRC, FRS 102/105, Companies House)
-// -------------------------------------------------------------
 object AccountancyRepository {
     val tips = listOf(
         AccountancyTip(
             id = 1,
             title = "Annual Investment Allowance (AIA) & Full Expensing",
             summary = "Write off 100% of qualifying plant & machinery up to £1,000,000 upfront.",
-            deepDive = "Under UK tax law, the Annual Investment Allowance allows companies and unincorporated businesses to deduct 100% of the cost of qualifying plant and machinery up to the £1m cap. Companies can also utilize permanent Full Expensing (100% first-year allowance for main rate expenditure) to slash taxable profits immediately.",
+            deepDive = "Under UK tax law, the Annual Investment Allowance allows companies to deduct 100% of the cost of qualifying plant and machinery up to the £1m cap. Companies can also utilize permanent Full Expensing (100% first-year allowance for main rate expenditure) to slash taxable profits immediately.",
             category = TipCategory.TAX,
-            impact = "Immediate 25% Corporation Tax Shield"
+            impact = "Immediate 25% Corporation Tax Shield",
+            triggerCondition = { report -> report.netProfitBeforeTax > 50000.0 }
         ),
         AccountancyTip(
             id = 2,
-            title = "UK Corporation Tax Marginal Relief Taper",
-            summary = "Profits between £50,000 and £250,000 receive an effective tapered tax rate.",
-            deepDive = "Companies with taxable profits below £50,000 pay the 19% small profits rate, while profits over £250,000 pay the full 25% main rate. If your profit is in the £50k-£250k bracket, you claim Marginal Relief using the standard fraction (3/400). Note that associated companies reduce these thresholds proportionately.",
+            title = "UK Corporation Tax Marginal Relief Taper (26.5% Effective Rate)",
+            summary = "Profits between £50,000 and £250,000 face a 26.5% marginal tax rate on every extra pound.",
+            deepDive = "Companies with taxable profits below £50,000 pay the 19% small profits rate, while profits over £250,000 pay the full 25% main rate. In the £50k-£250k bracket, marginal relief applies using the statutory fraction (3/200). Tax planning (pension contributions, capital allowances, bonuses) is doubly effective here because each deducted pound saves 26.5p in tax.",
             category = TipCategory.TAX,
-            impact = "Avoid Overpaying HMRC Corp Tax"
+            impact = "Saves 26.5p per £1 of Allowable Expense",
+            triggerCondition = { report -> report.netProfitBeforeTax in 50000.0..250000.0 }
         ),
         AccountancyTip(
             id = 3,
@@ -119,7 +134,8 @@ object AccountancyRepository {
             summary = "Reclaim output VAT on unpaid customer invoices older than 6 months.",
             deepDive = "Under Section 36 of VATA 1994, if a UK trade debtor hasn't paid you after 6 months from the date of the invoice (and has been written off in your day-to-day accounts), you can reclaim the VAT already accounted for on Box 4 of your next Making Tax Digital (MTD) VAT return.",
             category = TipCategory.VAT,
-            impact = "Recovers 20% Cash on Defaulted Invoices"
+            impact = "Recovers 20% Cash on Defaulted Invoices",
+            triggerCondition = { report -> report.tradeDebtors > 30000.0 }
         ),
         AccountancyTip(
             id = 4,
@@ -139,48 +155,64 @@ object AccountancyRepository {
         ),
         AccountancyTip(
             id = 6,
-            title = "Companies House Audit Exemption Limits",
-            summary = "Check if your small company qualifies for audit exemption under CA 2006.",
-            deepDive = "Under Section 477 of the Companies Act 2006, a small private limited company is exempt from statutory audit if it meets at least 2 of the following: annual turnover not more than £10.2m, balance sheet total not more than £5.1m, and average employees not more than 50.",
+            title = "Companies House Audit Exemption Thresholds",
+            summary = "Verify your small company eligibility under Section 477 of the Companies Act 2006.",
+            deepDive = "A private limited company in the UK is exempt from statutory audit if it satisfies at least 2 of 3 conditions: Annual Turnover ≤ £15m (for periods beginning on/after 6 April 2025; £10.2m previously), Balance Sheet Total ≤ £7.5m (formerly £5.1m), and average employees ≤ 50.",
             category = TipCategory.PRO,
-            impact = "Saves £5,000 - £15,000 in External Audit Fees"
+            impact = "Saves £5,000 - £15,000 in External Audit Fees",
+            triggerCondition = { report -> report.turnover in 1.0..15000000.0 && report.totalAssets in 1.0..7500000.0 }
         ),
         AccountancyTip(
             id = 7,
             title = "Segregated HMRC Tax Reservoir Account",
             summary = "Isolate PAYE/NIC and collected Output VAT weekly.",
-            deepDive = "Never retain collected VAT or PAYE/National Insurance payroll deductions in your operational account. Sweep 20% of net trade receipts and monthly payroll deductions to an interest-bearing business savings account every Friday so HMRC direct debits never cause overdraft charges.",
+            deepDive = "Never retain collected VAT or PAYE/National Insurance payroll deductions in your operational current account. Sweep 20% of net trade receipts and monthly payroll deductions to an interest-bearing business savings account every Friday so HMRC direct debits never risk default surcharges.",
             category = TipCategory.TAX,
-            impact = "Zero HMRC Surcharge Notice Defaults"
+            impact = "Zero HMRC Surcharge Notice Defaults",
+            triggerCondition = { report -> report.creditorsDueWithinOneYear > report.cashAtBank }
+        ),
+        AccountancyTip(
+            id = 8,
+            title = "Stock Write-Down & Net Realisable Value (NRV)",
+            summary = "Write down slow-moving stock to reduce Corporation Tax and clean balance sheet.",
+            deepDive = "Under FRS 102 Section 13, inventories must be measured at the lower of cost and estimated selling price less costs to complete and sell (NRV). Writing down aged or obsolete stock provides an immediate deduction against trading profit, reducing Corporation Tax while improving working capital accuracy.",
+            category = TipCategory.BOOKKEEPING,
+            impact = "Lowers Taxable Trading Profit Immediately",
+            triggerCondition = { report -> report.stockInventory > (report.currentAssets * 0.4) }
         )
     )
 
-    val cheatSheet = listOf(
+    fun getStandardCheatSheet(): List<CheatSheetEntry> = listOf(
         CheatSheetEntry(
+            id = "cs_depreciation",
             transaction = "Depreciation on Plant & Machinery",
             debit = "Depreciation Charge (Profit & Loss)",
             credit = "Accumulated Depreciation (Balance Sheet)",
             explanation = "Reduces carrying value under FRS 102/105. Disallowed for Corp Tax (replaced by Capital Allowances)."
         ),
         CheatSheetEntry(
+            id = "cs_vat_payment",
             transaction = "VAT Quarter Settlement (HMRC Payment)",
             debit = "HMRC VAT Control Account (Creditors)",
             credit = "Bank Current Account (Cash)",
             explanation = "Clears net liability of Box 5 (Output VAT minus Input VAT) paid via MTD direct debit."
         ),
         CheatSheetEntry(
+            id = "cs_advance",
             transaction = "Customer Advance / Deposit with VAT",
             debit = "Bank Current Account (Cash)",
             credit = "Deferred Income (Creditors) & Output VAT",
             explanation = "Creates a tax point immediately for VAT even though turnover is not yet recognized in P&L."
         ),
         CheatSheetEntry(
+            id = "cs_dividend",
             transaction = "Director's Loan Account (DLA) Dividend",
             debit = "Retained Earnings / Equity (Dividends Paid)",
             credit = "Director's Loan Account (Creditors)",
             explanation = "Credits the director after formal board approval, provided sufficient distributable reserves exist."
         ),
         CheatSheetEntry(
+            id = "cs_paye",
             transaction = "PAYE & Employee NIC Monthly Sweep",
             debit = "Gross Wages & Employer's NIC Expense",
             credit = "Net Wages Payable & PAYE/NIC Liability",
@@ -189,16 +221,13 @@ object AccountancyRepository {
     )
 }
 
-// -------------------------------------------------------------
-// UK Financial Analysis & Advisory Engine
-// -------------------------------------------------------------
 object UKReportAnalysisEngine {
 
     /**
-     * Calculates UK Corporation Tax using current HMRC rate bands:
+     * Calculates UK Corporation Tax using standard HMRC rate bands:
      * - Profit <= £50k: 19% (Small profits rate)
      * - Profit >= £250k: 25% (Main rate)
-     * - £50k - £250k: 25% minus Marginal Relief: (3/400) * (£250,000 - Profit)
+     * - £50k - £250k: 25% minus Marginal Relief using fraction 3/200: (3/200) * (£250,000 - Profit)
      */
     fun calculateCorporationTax(profit: Double): Double {
         if (profit <= 0.0) return 0.0
@@ -207,7 +236,7 @@ object UKReportAnalysisEngine {
             profit >= 250000.0 -> profit * 0.25
             else -> {
                 val fullTax = profit * 0.25
-                val marginalRelief = (3.0 / 400.0) * (250000.0 - profit)
+                val marginalRelief = (3.0 / 200.0) * (250000.0 - profit)
                 (fullTax - marginalRelief).coerceAtLeast(0.0)
             }
         }
@@ -244,7 +273,7 @@ object UKReportAnalysisEngine {
                     key.contains("total creditor") || key.contains("total liabilit") -> totalCreditors = value
                     key.contains("shareholder") || key.contains("equity") || key.contains("retained") || key.contains("capital") -> equity = value
                     key.contains("turnover") || key.contains("revenue") || key.contains("sales") -> turnover = value
-                    key.contains("profit before tax") || key.contains("net profit") || key.contains("net income") -> netProfit = value
+                    key.contains("profit before tax") || key.contains("net profit") || key.contains("net income") || key.contains("pbt") -> netProfit = value
                 }
             }
         }
@@ -335,6 +364,7 @@ object UKReportAnalysisEngine {
         if (report.totalAssets > 0 && Math.abs(discrepancy) > 1.0) {
             adviceList.add(
                 AdvisoryRecommendation(
+                    id = "adv_imbalance",
                     title = "Companies House Balance Sheet Imbalance",
                     severity = "CRITICAL AUDIT ITEM",
                     color = Color(0xFFF85149),
@@ -344,17 +374,28 @@ object UKReportAnalysisEngine {
             )
         }
 
-        // 2. Corporation Tax Liability Advisory
+        // 2. Corporation Tax Liability Advisory with Marginal Rate insight
         if (report.netProfitBeforeTax > 0) {
             val estimatedCT = calculateCorporationTax(report.netProfitBeforeTax)
             val effectiveRate = (estimatedCT / report.netProfitBeforeTax) * 100.0
+            val isMarginal = report.netProfitBeforeTax in 50000.0..250000.0
+
             adviceList.add(
                 AdvisoryRecommendation(
-                    title = "HMRC Corporation Tax Reserve Estimate",
-                    severity = "TAX PLANNING",
+                    id = "adv_tax_reserve",
+                    title = if (isMarginal) "HMRC Corporation Tax (26.5% Marginal Taper Active)" else "HMRC Corporation Tax Reserve Estimate",
+                    severity = if (isMarginal) "HIGH PRIORITY TAX PLANNING" else "TAX PLANNING",
                     color = Color(0xFF58A6FF),
-                    advice = "Estimated Corp Tax is £%,.0f (Effective rate: %.1f%%). HMRC payment deadline is 9 months and 1 day after accounting period end.".format(Locale.UK, estimatedCT, effectiveRate),
-                    actionItem = "Consider utilizing Annual Investment Allowance (AIA) or pension contributions before year-end to reduce taxable profit."
+                    advice = if (isMarginal) {
+                        "Estimated Corp Tax is £%,.0f (Effective rate: %.1f%%). Because profits sit between £50k and £250k, each marginal pound of profit bears a 26.5%% effective tax charge.".format(Locale.UK, estimatedCT, effectiveRate)
+                    } else {
+                        "Estimated Corp Tax is £%,.0f (Effective rate: %.1f%%). HMRC payment deadline is 9 months and 1 day after accounting period end.".format(Locale.UK, estimatedCT, effectiveRate)
+                    },
+                    actionItem = if (isMarginal) {
+                        "Accelerate allowable deductions (AIA equipment, employer pension contribution, director bonuses) to capture 26.5p of tax relief per £1 spent."
+                    } else {
+                        "Consider utilizing Annual Investment Allowance (AIA) or pension contributions before year-end to reduce taxable profit."
+                    }
                 )
             )
         }
@@ -365,6 +406,7 @@ object UKReportAnalysisEngine {
             if (cr < 1.1) {
                 adviceList.add(
                     AdvisoryRecommendation(
+                        id = "adv_liquidity",
                         title = "Creditor Default & Cash Shortfall Warning",
                         severity = "HIGH RISK",
                         color = Color(0xFFF85149),
@@ -376,29 +418,31 @@ object UKReportAnalysisEngine {
         }
 
         // 4. Stagnant Stock Warning
-        if (report.currentAssets > 0 && report.stockInventory > (report.currentAssets * 0.50)) {
+        if (report.currentAssets > 0 && report.stockInventory > (report.currentAssets * 0.40)) {
             adviceList.add(
                 AdvisoryRecommendation(
+                    id = "adv_stock",
                     title = "Excess Capital Locked in Stock",
                     severity = "MODERATE RISK",
                     color = Color(0xFFD29922),
-                    advice = "Stock (£%,.0f) makes up over 50%% of total current assets, restricting business liquidity.".format(Locale.UK, report.stockInventory),
-                    actionItem = "Carry out a stock turn analysis. Discount lines aged >90 days to free up cash and reduce insurance/storage overhead."
+                    advice = "Stock (£%,.0f) makes up over 40%% of total current assets, restricting business liquidity.".format(Locale.UK, report.stockInventory),
+                    actionItem = "Perform Net Realisable Value (NRV) review under FRS 102. Discount or write down aged lines to lower taxable profit and free working cash."
                 )
             )
         }
 
         // 5. Audit Exemption Assessment
         if (report.turnover > 0 && report.totalAssets > 0) {
-            val isExempt = report.turnover <= 10200000.0 && report.totalAssets <= 5100000.0
+            val isExempt = report.turnover <= 15000000.0 && report.totalAssets <= 7500000.0
             if (isExempt) {
                 adviceList.add(
                     AdvisoryRecommendation(
+                        id = "adv_audit",
                         title = "Eligible for UK Small Company Audit Exemption",
                         severity = "COMPLIANCE BENEFIT",
                         color = Color(0xFF2EA043),
-                        advice = "Turnover (£%,.0f) and Total Assets (£%,.0f) sit safely under the £10.2m / £5.1m statutory thresholds.".format(Locale.UK, report.turnover, report.totalAssets),
-                        actionItem = "File unaudited FRS 102 Section 1A or FRS 105 Micro-entity accounts with Companies House to save audit costs."
+                        advice = "Turnover (£%,.0f) and Total Assets (£%,.0f) sit safely under the £15m / £7.5m statutory thresholds.".format(Locale.UK, report.turnover, report.totalAssets),
+                        actionItem = "File unaudited FRS 102 Section 1A or FRS 105 Micro-entity accounts with Companies House to save external audit costs."
                     )
                 )
             }
@@ -406,11 +450,194 @@ object UKReportAnalysisEngine {
 
         return adviceList
     }
+
+    /**
+     * Generates a concrete, dynamic Action Checklist tailored directly to the uploaded balance sheet numbers.
+     */
+    fun generateTasks(report: BalanceSheetReport): List<ActionTask> {
+        val tasks = mutableListOf<ActionTask>()
+
+        // Imbalance fix
+        val expectedAssets = report.totalCreditors + report.shareholderFunds
+        val discrepancy = report.totalAssets - expectedAssets
+        if (Math.abs(discrepancy) > 1.0 && report.totalAssets > 0) {
+            tasks.add(
+                ActionTask(
+                    id = "task_fix_imbalance",
+                    title = "Reconcile Balance Sheet Difference of £%,.0f".format(Locale.UK, Math.abs(discrepancy)),
+                    urgency = "CRITICAL",
+                    urgencyColor = Color(0xFFF85149),
+                    rationale = "Companies House requires Total Assets to strictly match Total Creditors + Shareholder Funds.",
+                    procedure = "Review unposted general ledger journals: verify Retained Profit brought forward, depreciation accruals, and director dividend postings.",
+                    statutoryReference = "Companies Act 2006 s.393 (True and Fair view)"
+                )
+            )
+        }
+
+        // Tax reserve task
+        if (report.netProfitBeforeTax > 0) {
+            val estimatedCT = calculateCorporationTax(report.netProfitBeforeTax)
+            val isMarginal = report.netProfitBeforeTax in 50000.0..250000.0
+
+            tasks.add(
+                ActionTask(
+                    id = "task_ct_reserve",
+                    title = "Sweep £%,.0f to HMRC Tax Reserve Account".format(Locale.UK, estimatedCT),
+                    urgency = if (isMarginal) "HIGH PRIORITY" else "ESSENTIAL",
+                    urgencyColor = if (isMarginal) Color(0xFFD29922) else Color(0xFF58A6FF),
+                    rationale = if (isMarginal) {
+                        "Profits are subject to the 26.5% marginal taper. Ring-fencing cash prevents late HMRC payment interest."
+                    } else {
+                        "Ensure tax liability is ring-fenced 9 months and 1 day after your accounting period end."
+                    },
+                    procedure = "Transfer £%,.0f into a designated deposit account. Check pre-year-end capital allowance investments (AIA) to legally reduce this liability.".format(Locale.UK, estimatedCT),
+                    statutoryReference = "TMA 1970 s.59D / Corporation Tax Act 2010"
+                )
+            )
+        }
+
+        // Aged debtors task
+        if (report.tradeDebtors > 25000.0) {
+            val potentialVatRelief = (report.tradeDebtors * 0.15) * (20.0 / 120.0)
+            tasks.add(
+                ActionTask(
+                    id = "task_chase_debtors",
+                    title = "Audit Trade Debtors Book (£%,.0f)".format(Locale.UK, report.tradeDebtors),
+                    urgency = "CASH FLOW",
+                    urgencyColor = Color(0xFF58A6FF),
+                    rationale = "Aged trade debtors tie up working capital. Invoices unpaid past 6 months qualify for VAT Bad Debt Relief.",
+                    procedure = "Issue 7-day payment demand letters. For balances older than 6 months already written off, reclaim approximately £%,.0f via Box 4 of next MTD VAT return.".format(Locale.UK, potentialVatRelief),
+                    statutoryReference = "VATA 1994 Section 36 (Bad Debt Relief)"
+                )
+            )
+        }
+
+        // Working capital & liquidity task
+        if (report.creditorsDueWithinOneYear > 0) {
+            val cr = report.currentAssets / report.creditorsDueWithinOneYear
+            if (cr < 1.15) {
+                tasks.add(
+                    ActionTask(
+                        id = "task_working_capital",
+                        title = "Implement Working Capital Buffer Plan",
+                        urgency = "WARNING",
+                        urgencyColor = Color(0xFFF85149),
+                        rationale = "Current Ratio is %.2fx. Current liabilities (£%,.0f) threaten cash solvency.".format(Locale.UK, cr, report.creditorsDueWithinOneYear),
+                        procedure = "Negotiate extended 60-day terms with key suppliers, defer non-essential capex, or arrange a formal director loan buffer.",
+                        statutoryReference = "Insolvency Act 1986 s.123 (Cash-flow test)"
+                    )
+                )
+            }
+        }
+
+        // Stock inventory NRV task
+        if (report.stockInventory > 30000.0) {
+            tasks.add(
+                ActionTask(
+                    id = "task_stock_nrv",
+                    title = "Perform Stock Net Realisable Value (NRV) Audit",
+                    urgency = "TAX SAVING",
+                    urgencyColor = Color(0xFF2EA043),
+                    rationale = "Stock carries a value of £%,.0f. Any damaged or slow-moving lines can be written down to reduce Corporation Tax.".format(Locale.UK, report.stockInventory),
+                    procedure = "Run an inventory aging report (>90 days). Write down carrying values to expected net recovery price before balance sheet sign-off.",
+                    statutoryReference = "FRS 102 Section 13 (Inventories)"
+                )
+            )
+        }
+
+        // Audit exemption confirmation
+        if (report.turnover > 0 && report.turnover <= 15000000.0 && report.totalAssets <= 7500000.0) {
+            tasks.add(
+                ActionTask(
+                    id = "task_file_exempt",
+                    title = "Adopt Audit Exemption Statement on Balance Sheet",
+                    urgency = "COMPLIANCE",
+                    urgencyColor = Color(0xFF2EA043),
+                    rationale = "Company qualifies as small under Companies Act 2006.",
+                    procedure = "Include standard statutory audit exemption notes on the final balance sheet submitted to Companies House.",
+                    statutoryReference = "Companies Act 2006 Section 477"
+                )
+            )
+        }
+
+        return tasks
+    }
+
+    /**
+     * Dynamically generates customized journal entries that directly incorporate the numbers from the uploaded balance sheet!
+     */
+    fun generateDynamicJournalEntries(report: BalanceSheetReport): List<CheatSheetEntry> {
+        val dynamicList = mutableListOf<CheatSheetEntry>()
+
+        // 1. Corporation Tax Accrual Journal
+        if (report.netProfitBeforeTax > 0) {
+            val estimatedCT = calculateCorporationTax(report.netProfitBeforeTax)
+            dynamicList.add(
+                CheatSheetEntry(
+                    id = "dyn_ct_accrual",
+                    transaction = "Accrue Corporation Tax for the Period (£%,.0f)".format(Locale.UK, estimatedCT),
+                    debit = "Taxation on Ordinary Activities (P&L): £%,.0f".format(Locale.UK, estimatedCT),
+                    credit = "Corporation Tax Liability (Creditors < 1yr): £%,.0f".format(Locale.UK, estimatedCT),
+                    explanation = "Accrues current tax obligation calculated on £%,.0f PBT before financial year close.".format(Locale.UK, report.netProfitBeforeTax),
+                    isSuggestedForReport = true,
+                    suggestedContext = "Derived directly from your uploaded Profit Before Tax"
+                )
+            )
+        }
+
+        // 2. Bad Debt Provision on Large Debtors Book
+        if (report.tradeDebtors > 25000.0) {
+            val provisionAmt = report.tradeDebtors * 0.05
+            dynamicList.add(
+                CheatSheetEntry(
+                    id = "dyn_bad_debt",
+                    transaction = "5% General/Specific Doubtful Debts Provision (£%,.0f)".format(Locale.UK, provisionAmt),
+                    debit = "Bad & Doubtful Debts Expense (P&L): £%,.0f".format(Locale.UK, provisionAmt),
+                    credit = "Provision for Doubtful Debts (Contra-Asset): £%,.0f".format(Locale.UK, provisionAmt),
+                    explanation = "Prudence adjustment against £%,.0f trade debtors to reflect estimated non-recoverable accounts under FRS 102.".format(Locale.UK, report.tradeDebtors),
+                    isSuggestedForReport = true,
+                    suggestedContext = "Recommended for your £%,.0f Trade Debtors balance".format(Locale.UK, report.tradeDebtors)
+                )
+            )
+        }
+
+        // 3. Stock Write Down to NRV
+        if (report.stockInventory > 30000.0) {
+            val writeDownAmt = report.stockInventory * 0.08
+            dynamicList.add(
+                CheatSheetEntry(
+                    id = "dyn_stock_write_down",
+                    transaction = "Obsolete Stock Write-Down to NRV (£%,.0f)".format(Locale.UK, writeDownAmt),
+                    debit = "Cost of Sales / Stock Write-Down (P&L): £%,.0f".format(Locale.UK, writeDownAmt),
+                    credit = "Stock Inventory on Hand (Current Assets): £%,.0f".format(Locale.UK, writeDownAmt),
+                    explanation = "Reduces £%,.0f stock carrying value to net realisable value, decreasing taxable trading profits.".format(Locale.UK, report.stockInventory),
+                    isSuggestedForReport = true,
+                    suggestedContext = "Recommended based on your £%,.0f stock holding".format(Locale.UK, report.stockInventory)
+                )
+            )
+        }
+
+        // 4. Working Capital Loan Reclassification
+        if (report.creditorsDueWithinOneYear > 100000.0) {
+            dynamicList.add(
+                CheatSheetEntry(
+                    id = "dyn_refinance_loan",
+                    transaction = "Term-Loan Reclassification (Short to Long-Term)",
+                    debit = "Bank Loans Due Within 1 Year (Current Creditors)",
+                    credit = "Bank Loans Due After 1 Year (Non-Current Creditors)",
+                    explanation = "Refinances short-term liabilities into long-term facility to restore current ratio from strained level.",
+                    isSuggestedForReport = true,
+                    suggestedContext = "Addresses £%,.0f in short-term creditors".format(Locale.UK, report.creditorsDueWithinOneYear)
+                )
+            )
+        }
+
+        // Append standard cheat-sheet items
+        dynamicList.addAll(AccountancyRepository.getStandardCheatSheet())
+        return dynamicList
+    }
 }
 
-// -------------------------------------------------------------
-// Main Android Activity
-// -------------------------------------------------------------
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -431,240 +658,11 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// -------------------------------------------------------------
-// UI Navigation
-// -------------------------------------------------------------
 @Composable
 fun UKAccountancyAppScreen() {
     var selectedTab by remember { mutableStateOf(0) }
 
-    Scaffold(
-        bottomBar = {
-            NavigationBar(containerColor = Color(0xFF161B22)) {
-                NavigationBarItem(
-                    selected = selectedTab == 0,
-                    onClick = { selectedTab = 0 },
-                    icon = { Icon(Icons.Default.Lightbulb, contentDescription = "Tips") },
-                    label = { Text("UK Tips", fontSize = 11.sp) }
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 1,
-                    onClick = { selectedTab = 1 },
-                    icon = { Icon(Icons.Default.Analytics, contentDescription = "Report Audit") },
-                    label = { Text("Balance Audit", fontSize = 11.sp) }
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 2,
-                    onClick = { selectedTab = 2 },
-                    icon = { Icon(Icons.Default.Calculate, contentDescription = "HMRC Calc") },
-                    label = { Text("HMRC Tax", fontSize = 11.sp) }
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 3,
-                    onClick = { selectedTab = 3 },
-                    icon = { Icon(Icons.Default.SwapHoriz, contentDescription = "Double Entry") },
-                    label = { Text("Cheatsheet", fontSize = 11.sp) }
-                )
-            }
-        }
-    ) { innerPadding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFF0D1117))
-                .padding(innerPadding)
-        ) {
-            when (selectedTab) {
-                0 -> UKTipsView()
-                1 -> UKReportImportAuditView()
-                2 -> UKTaxCalculatorView()
-                3 -> UKCheatsheetView()
-            }
-        }
-    }
-}
-
-// -------------------------------------------------------------
-// TAB 1: UK Tips & HMRC Strategy Browser
-// -------------------------------------------------------------
-@Composable
-fun UKTipsView() {
-    var selectedCategory by remember { mutableStateOf(TipCategory.ALL) }
-    var searchQuery by remember { mutableStateOf("") }
-    var expandedTipId by remember { mutableStateOf<Int?>(null) }
-    var bookmarkedIds by remember { mutableStateOf(setOf<Int>()) }
-
-    val filteredTips = remember(selectedCategory, searchQuery) {
-        AccountancyRepository.tips.filter { tip ->
-            (selectedCategory == TipCategory.ALL || tip.category == selectedCategory) &&
-                    (tip.title.contains(searchQuery, ignoreCase = true) ||
-                            tip.summary.contains(searchQuery, ignoreCase = true))
-        }
-    }
-
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text(
-                    text = "LEDGER PRO UK",
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Black,
-                    color = Color(0xFF2EA043),
-                    letterSpacing = 1.5.sp
-                )
-                Text(
-                    text = "HMRC & Companies House Accounting Hub",
-                    fontSize = 12.sp,
-                    color = Color(0xFF8B949E)
-                )
-            }
-            Badge(containerColor = Color(0xFF21262D)) {
-                Text(
-                    text = "${bookmarkedIds.size} Saved",
-                    color = Color(0xFF58A6FF),
-                    modifier = Modifier.padding(4.dp)
-                )
-            }
-        }
-
-        OutlinedTextField(
-            value = searchQuery,
-            onValueChange = { searchQuery = it },
-            placeholder = { Text("Search HMRC, AIA, VAT, reverse charge...", color = Color(0xFF6E7681), fontSize = 13.sp) },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Color(0xFF8B949E)) },
-            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
-            shape = RoundedCornerShape(12.dp),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = Color(0xFF2EA043),
-                unfocusedBorderColor = Color(0xFF30363D),
-                focusedTextColor = Color.White,
-                unfocusedTextColor = Color.White
-            ),
-            singleLine = true
-        )
-
-        LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.fillMaxWidth().padding(bottom = 14.dp)
-        ) {
-            items(TipCategory.values()) { category ->
-                val active = selectedCategory == category
-                FilterChip(
-                    selected = active,
-                    onClick = { selectedCategory = category },
-                    label = { Text(category.title, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
-                    leadingIcon = {
-                        Icon(category.icon, contentDescription = null, modifier = Modifier.size(14.dp))
-                    },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = Color(0xFF238636),
-                        selectedLabelColor = Color.White,
-                        containerColor = Color(0xFF161B22),
-                        labelColor = Color(0xFFC9D1D9)
-                    )
-                )
-            }
-        }
-
-        LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            items(filteredTips) { tip ->
-                val isExpanded = expandedTipId == tip.id
-                val isSaved = bookmarkedIds.contains(tip.id)
-
-                Card(
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF161B22)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, if (isExpanded) Color(0xFF2EA043) else Color(0xFF30363D), RoundedCornerShape(14.dp))
-                        .clickable { expandedTipId = if (isExpanded) null else tip.id }
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.Top
-                        ) {
-                            Text(
-                                text = tip.title,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 15.sp,
-                                color = Color(0xFFF0F6FC),
-                                modifier = Modifier.weight(1f)
-                            )
-                            IconButton(
-                                onClick = {
-                                    bookmarkedIds = if (isSaved) bookmarkedIds - tip.id else bookmarkedIds + tip.id
-                                },
-                                modifier = Modifier.size(24.dp)
-                            ) {
-                                Icon(
-                                    imageVector = if (isSaved) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
-                                    contentDescription = "Save",
-                                    tint = if (isSaved) Color(0xFF58A6FF) else Color(0xFF8B949E),
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(text = tip.summary, fontSize = 13.sp, color = Color(0xFF8B949E))
-
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = Color(0xFF1F6FEB).copy(alpha = 0.15f)
-                        ) {
-                            Text(
-                                text = "★ ${tip.impact}",
-                                color = Color(0xFF58A6FF),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                            )
-                        }
-
-                        AnimatedVisibility(visible = isExpanded) {
-                            Column(modifier = Modifier.padding(top = 12.dp)) {
-                                Divider(color = Color(0xFF30363D), thickness = 1.dp)
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = "UK Practice Guidance & Statute:",
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 12.sp,
-                                    color = Color(0xFF2EA043)
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = tip.deepDive,
-                                    fontSize = 12.sp,
-                                    lineHeight = 18.sp,
-                                    color = Color(0xFFC9D1D9)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-// -------------------------------------------------------------
-// TAB 2: UK Balance Sheet Audit & Advisory
-// -------------------------------------------------------------
-@Composable
-fun UKReportImportAuditView() {
-    val context = LocalContext.current
-
-    // Default UK balance sheet sample in GBP
+    // Central shared balance sheet state driving all tabs
     var rawInputText by remember {
         mutableStateOf(
             """
@@ -683,8 +681,177 @@ Profit Before Tax: £65,000
         )
     }
 
-    var report by remember { mutableStateOf(UKReportAnalysisEngine.parseReportText(rawInputText, "UK FRS Sample")) }
+    var report by remember {
+        mutableStateOf(UKReportAnalysisEngine.parseReportText(rawInputText, "UK FRS Sample"))
+    }
     var importedFileName by remember { mutableStateOf("UK FRS Sample") }
+
+    // Synchronized active tasks generated from the balance sheet
+    var activeTasks by remember { mutableStateOf(UKReportAnalysisEngine.generateTasks(report)) }
+
+    // Re-generate tasks whenever the active report updates
+    LaunchedEffect(report) {
+        activeTasks = UKReportAnalysisEngine.generateTasks(report)
+    }
+
+    Scaffold(
+        bottomBar = {
+            NavigationBar(containerColor = Color(0xFF161B22)) {
+                NavigationBarItem(
+                    selected = selectedTab == 0,
+                    onClick = { selectedTab = 0 },
+                    icon = { Icon(Icons.Default.Analytics, contentDescription = "Audit & Import") },
+                    label = { Text("Audit & Import", fontSize = 10.sp) }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 1,
+                    onClick = { selectedTab = 1 },
+                    icon = {
+                        BadgedBox(
+                            badge = {
+                                val pending = activeTasks.count { !it.isDone }
+                                if (pending > 0) {
+                                    Badge(containerColor = Color(0xFFF85149)) {
+                                        Text("$pending", color = Color.White, fontSize = 10.sp)
+                                    }
+                                }
+                            }
+                        ) {
+                            Icon(Icons.Default.PlaylistAddCheck, contentDescription = "Action Tasks")
+                        }
+                    },
+                    label = { Text("Action Tasks", fontSize = 10.sp) }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 2,
+                    onClick = { selectedTab = 2 },
+                    icon = { Icon(Icons.Default.Calculate, contentDescription = "HMRC Tax") },
+                    label = { Text("HMRC Tax", fontSize = 10.sp) }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 3,
+                    onClick = { selectedTab = 3 },
+                    icon = { Icon(Icons.Default.Lightbulb, contentDescription = "Tips") },
+                    label = { Text("UK Tips", fontSize = 10.sp) }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 4,
+                    onClick = { selectedTab = 4 },
+                    icon = { Icon(Icons.Default.SwapHoriz, contentDescription = "Journals") },
+                    label = { Text("Journals", fontSize = 10.sp) }
+                )
+            }
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF0D1117))
+                .padding(innerPadding)
+        ) {
+            // Persistent Active Report Indicator Banner
+            ActiveReportTopBanner(
+                report = report,
+                sourceName = importedFileName,
+                onNavigateToAudit = { selectedTab = 0 }
+            )
+
+            Box(modifier = Modifier.weight(1f)) {
+                when (selectedTab) {
+                    0 -> UKReportImportAuditView(
+                        report = report,
+                        rawInputText = rawInputText,
+                        importedFileName = importedFileName,
+                        onUpdateReport = { newReport, newRaw, newName ->
+                            report = newReport
+                            rawInputText = newRaw
+                            importedFileName = newName
+                        },
+                        onNavigateToTasks = { selectedTab = 1 },
+                        onNavigateToTax = { selectedTab = 2 }
+                    )
+                    1 -> UKActionTasksView(
+                        report = report,
+                        tasks = activeTasks,
+                        onToggleTask = { taskId ->
+                            activeTasks = activeTasks.map {
+                                if (it.id == taskId) it.copy(isDone = !it.isDone) else it
+                            }
+                        }
+                    )
+                    2 -> UKTaxCalculatorView(report = report)
+                    3 -> UKTipsView(report = report)
+                    4 -> UKCheatsheetView(report = report)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ActiveReportTopBanner(
+    report: BalanceSheetReport,
+    sourceName: String,
+    onNavigateToAudit: () -> Unit
+) {
+    Surface(
+        color = Color(0xFF161B22),
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(width = 1.dp, color = Color(0xFF30363D))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF2EA043))
+                )
+                Column {
+                    Text(
+                        text = "ACTIVE REPORT: ${sourceName.take(20)}",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFF0F6FC)
+                    )
+                    Text(
+                        text = "Turnover: £%,.0f  •  PBT: £%,.0f".format(Locale.UK, report.turnover, report.netProfitBeforeTax),
+                        fontSize = 10.sp,
+                        color = Color(0xFF8B949E)
+                    )
+                }
+            }
+
+            AssistChip(
+                onClick = onNavigateToAudit,
+                label = { Text("Change", fontSize = 10.sp, color = Color(0xFF58A6FF)) },
+                modifier = Modifier.height(28.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun UKReportImportAuditView(
+    report: BalanceSheetReport,
+    rawInputText: String,
+    importedFileName: String,
+    onUpdateReport: (BalanceSheetReport, String, String) -> Unit,
+    onNavigateToTasks: () -> Unit,
+    onNavigateToTax: () -> Unit
+) {
+    val context = LocalContext.current
     var showManualEdit by remember { mutableStateOf(false) }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -695,9 +862,9 @@ Profit Before Tax: £65,000
                 context.contentResolver.openInputStream(it)?.use { stream ->
                     val reader = BufferedReader(InputStreamReader(stream))
                     val content = reader.readText()
-                    rawInputText = content
-                    importedFileName = it.lastPathSegment ?: "Imported UK File"
-                    report = UKReportAnalysisEngine.parseReportText(content, importedFileName)
+                    val fileName = it.lastPathSegment ?: "Imported UK File"
+                    val parsed = UKReportAnalysisEngine.parseReportText(content, fileName)
+                    onUpdateReport(parsed, content, fileName)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -715,37 +882,19 @@ Profit Before Tax: £65,000
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        text = "UK BALANCE SHEET AUDIT",
-                        fontSize = 19.sp,
-                        fontWeight = FontWeight.Black,
-                        color = Color(0xFF2EA043),
-                        letterSpacing = 1.2.sp
-                    )
-                    Text(
-                        text = "FRS 102/105 Review & HMRC Corporation Tax Advisory",
-                        fontSize = 11.sp,
-                        color = Color(0xFF8B949E)
-                    )
-                }
-
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = Color(0xFF21262D)
-                ) {
-                    Text(
-                        text = importedFileName.take(16),
-                        color = Color(0xFF58A6FF),
-                        fontSize = 11.sp,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
-                }
+            Column {
+                Text(
+                    text = "UK BALANCE SHEET AUDIT & IMPORT",
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.Black,
+                    color = Color(0xFF2EA043),
+                    letterSpacing = 1.2.sp
+                )
+                Text(
+                    text = "Data feeds HMRC tax planning, automated tasks, and journals across the app.",
+                    fontSize = 11.sp,
+                    color = Color(0xFF8B949E)
+                )
             }
         }
 
@@ -779,13 +928,14 @@ Profit Before Tax: £65,000
             }
         }
 
-        // UK Preset Templates
+        // Quick Preset Templates
         item {
+            Text("Sample UK Scenarios:", fontSize = 11.sp, color = Color(0xFF8B949E), fontWeight = FontWeight.Bold)
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 item {
                     AssistChip(
                         onClick = {
-                            rawInputText = """
+                            val raw = """
 Cash at Bank: £140,000
 Trade Debtors: £60,000
 Stock: £0
@@ -798,16 +948,16 @@ Shareholder Funds: £215,000
 Turnover: £750,000
 Profit Before Tax: £180,000
                             """.trimIndent()
-                            importedFileName = "UK Tech Ltd (Profitable)"
-                            report = UKReportAnalysisEngine.parseReportText(rawInputText, importedFileName)
+                            val name = "UK Tech Ltd (£180k PBT)"
+                            onUpdateReport(UKReportAnalysisEngine.parseReportText(raw, name), raw, name)
                         },
-                        label = { Text("UK Tech Ltd (£180k PBT)", fontSize = 11.sp) }
+                        label = { Text("UK Tech Ltd (Marginal Relief)", fontSize = 11.sp) }
                     )
                 }
                 item {
                     AssistChip(
                         onClick = {
-                            rawInputText = """
+                            val raw = """
 Cash at Bank: £8,000
 Trade Debtors: £95,000
 Stock: £160,000
@@ -820,8 +970,8 @@ Shareholder Funds: £10,000
 Turnover: £600,000
 Profit Before Tax: -£25,000
                             """.trimIndent()
-                            importedFileName = "Distressed UK Retail"
-                            report = UKReportAnalysisEngine.parseReportText(rawInputText, importedFileName)
+                            val name = "Distressed UK Retail"
+                            onUpdateReport(UKReportAnalysisEngine.parseReportText(raw, name), raw, name)
                         },
                         label = { Text("Distressed Retail", fontSize = 11.sp) }
                     )
@@ -829,7 +979,7 @@ Profit Before Tax: -£25,000
                 item {
                     AssistChip(
                         onClick = {
-                            rawInputText = """
+                            val raw = """
 Cash at Bank: £45,000
 Trade Debtors: £35,000
 Stock: £50,000
@@ -842,8 +992,8 @@ Shareholder Funds: £110,000
 Turnover: £350,000
 Profit Before Tax: £32,000
                             """.trimIndent()
-                            importedFileName = "Imbalanced UK Audit"
-                            report = UKReportAnalysisEngine.parseReportText(rawInputText, importedFileName)
+                            val name = "Imbalanced UK Audit"
+                            onUpdateReport(UKReportAnalysisEngine.parseReportText(raw, name), raw, name)
                         },
                         label = { Text("Imbalanced Audit", fontSize = 11.sp) }
                     )
@@ -857,13 +1007,11 @@ Profit Before Tax: £32,000
                 Card(
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF161B22)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, Color(0xFF30363D), RoundedCornerShape(12.dp))
+                    modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFF30363D), RoundedCornerShape(12.dp))
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text(
-                            text = "Raw Ledger Input (Key: Value or CSV in £):",
+                            text = "Raw Ledger / Balance Sheet Input:",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFF58A6FF)
@@ -872,12 +1020,9 @@ Profit Before Tax: £32,000
                         OutlinedTextField(
                             value = rawInputText,
                             onValueChange = {
-                                rawInputText = it
-                                report = UKReportAnalysisEngine.parseReportText(it, "Manual Input")
+                                onUpdateReport(UKReportAnalysisEngine.parseReportText(it, "Manual Input"), it, "Manual Input")
                             },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(160.dp),
+                            modifier = Modifier.fillMaxWidth().height(150.dp),
                             shape = RoundedCornerShape(8.dp),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedTextColor = Color.White,
@@ -894,24 +1039,13 @@ Profit Before Tax: £32,000
 
         // Summary Card in GBP
         item {
-            Text(
-                text = "PARSED BALANCE SHEET METRICS (GBP)",
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color(0xFF8B949E),
-                letterSpacing = 1.sp
-            )
-        }
-
-        item {
             Card(
                 shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF161B22)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, Color(0xFF30363D), RoundedCornerShape(14.dp))
+                modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFF30363D), RoundedCornerShape(14.dp))
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("PARSED BALANCE SHEET (GBP)", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Total Assets:", color = Color(0xFF8B949E), fontSize = 13.sp)
                         Text(String.format(Locale.UK, "£%,.0f", report.totalAssets), color = Color(0xFF2EA043), fontWeight = FontWeight.Bold)
@@ -921,7 +1055,7 @@ Profit Before Tax: £32,000
                         Text(String.format(Locale.UK, "£%,.0f", report.currentAssets), color = Color.White, fontWeight = FontWeight.SemiBold)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Creditors Due (Within & After 1 Year):", color = Color(0xFF8B949E), fontSize = 13.sp)
+                        Text("Creditors Due (< 1yr + > 1yr):", color = Color(0xFF8B949E), fontSize = 13.sp)
                         Text(String.format(Locale.UK, "£%,.0f", report.totalCreditors), color = Color(0xFFF85149), fontWeight = FontWeight.SemiBold)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -932,19 +1066,41 @@ Profit Before Tax: £32,000
             }
         }
 
+        // Shortcuts to Linked Sections
+        item {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onNavigateToTasks,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1F6FEB)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.PlaylistAddCheck, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("View Tasks", fontSize = 11.sp)
+                }
+                Button(
+                    onClick = onNavigateToTax,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF238636)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.Calculate, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("HMRC Tax View", fontSize = 11.sp)
+                }
+            }
+        }
+
         // Metrics
         items(metrics) { metric ->
             Card(
                 shape = RoundedCornerShape(12.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF161B22)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, Color(0xFF30363D), RoundedCornerShape(12.dp))
+                modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFF30363D), RoundedCornerShape(12.dp))
             ) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
+                    modifier = Modifier.fillMaxWidth().padding(14.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -953,12 +1109,7 @@ Profit Before Tax: £32,000
                         Spacer(Modifier.height(2.dp))
                         Text(metric.explanation, color = Color(0xFF8B949E), fontSize = 11.sp, lineHeight = 16.sp)
                         Spacer(Modifier.height(4.dp))
-                        Text(
-                            text = metric.status,
-                            color = metric.statusColor,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
-                        )
+                        Text(text = metric.status, color = metric.statusColor, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                     }
                     Surface(
                         shape = RoundedCornerShape(8.dp),
@@ -978,26 +1129,15 @@ Profit Before Tax: £32,000
 
         // Advisory Section
         item {
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Icon(Icons.Default.Verified, contentDescription = null, tint = Color(0xFF2EA043), modifier = Modifier.size(18.dp))
-                Text(
-                    text = "UK ADVISORY & STATUTORY COMPLIANCE",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF2EA043),
-                    letterSpacing = 1.sp
-                )
-            }
+            Spacer(Modifier.height(4.dp))
+            Text("STATUTORY ADVISORY & COMPLIANCE FINDINGS", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF2EA043), letterSpacing = 1.sp)
         }
 
         items(recommendations) { advice ->
             Card(
                 shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF161B22)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, advice.color.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
+                modifier = Modifier.fillMaxWidth().border(1.dp, advice.color.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Row(
@@ -1005,54 +1145,18 @@ Profit Before Tax: £32,000
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = advice.title,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp,
-                            color = Color(0xFFF0F6FC),
-                            modifier = Modifier.weight(1f)
-                        )
-                        Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = advice.color.copy(alpha = 0.2f)
-                        ) {
-                            Text(
-                                text = advice.severity,
-                                color = advice.color,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Black,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                            )
+                        Text(advice.title, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFFF0F6FC), modifier = Modifier.weight(1f))
+                        Surface(shape = RoundedCornerShape(6.dp), color = advice.color.copy(alpha = 0.2f)) {
+                            Text(advice.severity, color = advice.color, fontSize = 10.sp, fontWeight = FontWeight.Black, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
                         }
                     }
-
                     Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = advice.advice,
-                        color = Color(0xFFC9D1D9),
-                        fontSize = 12.sp,
-                        lineHeight = 17.sp
-                    )
-
+                    Text(advice.advice, color = Color(0xFFC9D1D9), fontSize = 12.sp, lineHeight = 17.sp)
                     Spacer(Modifier.height(8.dp))
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = Color(0xFF0D1117),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
+                    Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D1117), modifier = Modifier.fillMaxWidth()) {
                         Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.Top) {
-                            Text(
-                                text = "ACTION: ",
-                                color = Color(0xFF58A6FF),
-                                fontWeight = FontWeight.Black,
-                                fontSize = 11.sp
-                            )
-                            Text(
-                                text = advice.actionItem,
-                                color = Color(0xFFF0F6FC),
-                                fontSize = 11.sp,
-                                lineHeight = 16.sp
-                            )
+                            Text("ACTION: ", color = Color(0xFF58A6FF), fontWeight = FontWeight.Black, fontSize = 11.sp)
+                            Text(advice.actionItem, color = Color(0xFFF0F6FC), fontSize = 11.sp, lineHeight = 16.sp)
                         }
                     }
                 }
@@ -1061,25 +1165,14 @@ Profit Before Tax: £32,000
     }
 }
 
-// -------------------------------------------------------------
-// TAB 3: UK Corporation Tax & VAT Calculator
-// -------------------------------------------------------------
 @Composable
-fun UKTaxCalculatorView() {
-    var turnoverInput by remember { mutableStateOf("") }
-    var allowableExpensesInput by remember { mutableStateOf("") }
-    var vatRateSelection by remember { mutableStateOf(20) } // Standard 20%, Reduced 5%, Zero 0%
-
-    val turnover = turnoverInput.toDoubleOrNull() ?: 0.0
-    val expenses = allowableExpensesInput.toDoubleOrNull() ?: 0.0
-    val taxableProfit = (turnover - expenses).coerceAtLeast(0.0)
-
-    val corpTax = UKReportAnalysisEngine.calculateCorporationTax(taxableProfit)
-    val effectiveRate = if (taxableProfit > 0) (corpTax / taxableProfit) * 100.0 else 0.0
-    val retainedProfit = taxableProfit - corpTax
-
-    // VAT estimate on turnover
-    val estimatedOutputVAT = turnover * (vatRateSelection / 100.0)
+fun UKActionTasksView(
+    report: BalanceSheetReport,
+    tasks: List<ActionTask>,
+    onToggleTask: (String) -> Unit
+) {
+    val completedCount = tasks.count { it.isDone }
+    val progressPct = if (tasks.isNotEmpty()) completedCount.toFloat() / tasks.size else 1f
 
     LazyColumn(
         modifier = Modifier
@@ -1088,8 +1181,179 @@ fun UKTaxCalculatorView() {
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Text("HMRC CORPORATION TAX & VAT CALCULATOR", fontSize = 18.sp, fontWeight = FontWeight.Black, color = Color(0xFF2EA043))
-            Text("Accurate UK Marginal Relief taper (19% - 25%) and VAT estimation.", fontSize = 12.sp, color = Color(0xFF8B949E))
+            Column {
+                Text(
+                    text = "ACTIONABLE AUDIT TASKS & FIXES",
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.Black,
+                    color = Color(0xFF2EA043),
+                    letterSpacing = 1.2.sp
+                )
+                Text(
+                    text = "Generated in real time from ${report.rawFileName}.",
+                    fontSize = 11.sp,
+                    color = Color(0xFF8B949E)
+                )
+            }
+        }
+
+        // Progress Card
+        item {
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF161B22)),
+                modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFF30363D), RoundedCornerShape(14.dp))
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Task Completion Score", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text("$completedCount / ${tasks.size} Done", fontSize = 12.sp, color = Color(0xFF58A6FF), fontWeight = FontWeight.Bold)
+                    }
+                    LinearProgressIndicator(
+                        progress = progressPct,
+                        modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                        color = Color(0xFF2EA043),
+                        trackColor = Color(0xFF21262D)
+                    )
+                }
+            }
+        }
+
+        items(tasks) { task ->
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (task.isDone) Color(0xFF11161D) else Color(0xFF161B22)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        1.dp,
+                        if (task.isDone) Color(0xFF2EA043).copy(alpha = 0.4f) else task.urgencyColor.copy(alpha = 0.5f),
+                        RoundedCornerShape(14.dp)
+                    )
+                    .clickable { onToggleTask(task.id) }
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.Top,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Checkbox(
+                        checked = task.isDone,
+                        onCheckedChange = { onToggleTask(task.id) },
+                        colors = CheckboxDefaults.colors(
+                            checkedColor = Color(0xFF2EA043),
+                            uncheckedColor = Color(0xFF8B949E)
+                        )
+                    )
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = task.title,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                color = if (task.isDone) Color(0xFF8B949E) else Color(0xFFF0F6FC)
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = task.urgencyColor.copy(alpha = 0.15f)
+                            ) {
+                                Text(
+                                    text = task.urgency,
+                                    color = task.urgencyColor,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Black,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.height(4.dp))
+                        Text(task.rationale, color = Color(0xFFC9D1D9), fontSize = 12.sp, lineHeight = 16.sp)
+
+                        Spacer(Modifier.height(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFF0D1117),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp)) {
+                                Text("HOW TO FIX:", fontSize = 10.sp, color = Color(0xFF58A6FF), fontWeight = FontWeight.Bold)
+                                Text(task.procedure, fontSize = 11.sp, color = Color(0xFFF0F6FC), lineHeight = 15.sp)
+                                Spacer(Modifier.height(4.dp))
+                                Text("Ref: ${task.statutoryReference}", fontSize = 10.sp, color = Color(0xFF8B949E), fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun UKTaxCalculatorView(report: BalanceSheetReport) {
+    var turnoverInput by remember(report) { mutableStateOf(if (report.turnover > 0) report.turnover.toInt().toString() else "") }
+    var allowableExpensesInput by remember(report) {
+        val calculatedExpenses = (report.turnover - report.netProfitBeforeTax).coerceAtLeast(0.0)
+        mutableStateOf(if (calculatedExpenses > 0) calculatedExpenses.toInt().toString() else "")
+    }
+    var vatRateSelection by remember { mutableStateOf(20) }
+
+    val turnover = turnoverInput.toDoubleOrNull() ?: 0.0
+    val expenses = allowableExpensesInput.toDoubleOrNull() ?: 0.0
+    val taxableProfit = (turnover - expenses).coerceAtLeast(0.0)
+
+    val corpTax = UKReportAnalysisEngine.calculateCorporationTax(taxableProfit)
+    val effectiveRate = if (taxableProfit > 0) (corpTax / taxableProfit) * 100.0 else 0.0
+    val retainedProfit = taxableProfit - corpTax
+    val estimatedOutputVAT = turnover * (vatRateSelection / 100.0)
+
+    val isMarginalRelief = taxableProfit in 50000.0..250000.0
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            Column {
+                Text("HMRC CORPORATION TAX & VAT", fontSize = 18.sp, fontWeight = FontWeight.Black, color = Color(0xFF2EA043))
+                Text("Figures automatically synchronized with your active balance sheet.", fontSize = 12.sp, color = Color(0xFF8B949E))
+            }
+        }
+
+        if (isMarginalRelief) {
+            item {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFFD29922).copy(alpha = 0.15f),
+                    modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFFD29922), RoundedCornerShape(10.dp))
+                ) {
+                    Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFFD29922), modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            text = "26.5% MARGINAL RELIEF BAND ACTIVE: Every extra £1 of allowable expense (pension, AIA plant/machinery) saves 26.5p in tax!",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFE3B341),
+                            lineHeight = 15.sp
+                        )
+                    }
+                }
+            }
         }
 
         item {
@@ -1176,48 +1440,237 @@ fun UKTaxCalculatorView() {
                 }
             }
         }
+    }
+}
 
-        item {
-            Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = Color(0xFF161B22),
-                modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFF30363D), RoundedCornerShape(10.dp))
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text("HMRC Filing Deadlines Note:", fontWeight = FontWeight.Bold, color = Color(0xFF58A6FF), fontSize = 12.sp)
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "• Corporation Tax payment is due 9 months and 1 day following your accounting period end.\n" +
-                        "• Company Tax Return (CT600) is due 12 months after your period end.\n" +
-                        "• VAT Returns & payments under MTD are due 1 calendar month and 7 days after the quarter end.",
-                        fontSize = 11.sp,
-                        color = Color(0xFF8B949E),
-                        lineHeight = 16.sp
+@Composable
+fun UKTipsView(report: BalanceSheetReport) {
+    var selectedCategory by remember { mutableStateOf(TipCategory.ALL) }
+    var searchQuery by remember { mutableStateOf("") }
+    var expandedTipId by remember { mutableStateOf<Int?>(null) }
+    var bookmarkedIds by remember { mutableStateOf(setOf<Int>()) }
+
+    val filteredTips = remember(selectedCategory, searchQuery, report) {
+        AccountancyRepository.tips.filter { tip ->
+            val matchesCategory = when (selectedCategory) {
+                TipCategory.ALL -> true
+                TipCategory.TAILORED -> tip.triggerCondition(report)
+                else -> tip.category == selectedCategory
+            }
+            matchesCategory &&
+                    (tip.title.contains(searchQuery, ignoreCase = true) ||
+                            tip.summary.contains(searchQuery, ignoreCase = true))
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(
+                    text = "UK KNOWLEDGE & STRATEGY",
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.Black,
+                    color = Color(0xFF2EA043),
+                    letterSpacing = 1.2.sp
+                )
+                Text(
+                    text = "HMRC legislation, AIA capital allowances & VAT rules",
+                    fontSize = 11.sp,
+                    color = Color(0xFF8B949E)
+                )
+            }
+            Badge(containerColor = Color(0xFF21262D)) {
+                Text(
+                    text = "${bookmarkedIds.size} Saved",
+                    color = Color(0xFF58A6FF),
+                    modifier = Modifier.padding(4.dp)
+                )
+            }
+        }
+
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            placeholder = { Text("Search AIA, marginal relief, VAT...", color = Color(0xFF6E7681), fontSize = 12.sp) },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Color(0xFF8B949E)) },
+            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+            shape = RoundedCornerShape(12.dp),
+            singleLine = true
+        )
+
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth().padding(bottom = 14.dp)
+        ) {
+            items(TipCategory.values()) { category ->
+                val active = selectedCategory == category
+                FilterChip(
+                    selected = active,
+                    onClick = { selectedCategory = category },
+                    label = { Text(category.title, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
+                    leadingIcon = {
+                        Icon(category.icon, contentDescription = null, modifier = Modifier.size(14.dp))
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = if (category == TipCategory.TAILORED) Color(0xFF1F6FEB) else Color(0xFF238636),
+                        selectedLabelColor = Color.White
                     )
+                )
+            }
+        }
+
+        LazyColumn(
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            items(filteredTips) { tip ->
+                val isExpanded = expandedTipId == tip.id
+                val isSaved = bookmarkedIds.contains(tip.id)
+                val isTailored = tip.triggerCondition(report)
+
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF161B22)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(
+                            1.dp,
+                            if (isTailored) Color(0xFF1F6FEB) else if (isExpanded) Color(0xFF2EA043) else Color(0xFF30363D),
+                            RoundedCornerShape(14.dp)
+                        )
+                        .clickable { expandedTipId = if (isExpanded) null else tip.id }
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                if (isTailored) {
+                                    Surface(
+                                        shape = RoundedCornerShape(4.dp),
+                                        color = Color(0xFF1F6FEB).copy(alpha = 0.2f),
+                                        modifier = Modifier.padding(bottom = 4.dp)
+                                    ) {
+                                        Text(
+                                            text = "TRIGGERED BY YOUR BALANCE SHEET",
+                                            color = Color(0xFF58A6FF),
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = tip.title,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = Color(0xFFF0F6FC)
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    bookmarkedIds = if (isSaved) bookmarkedIds - tip.id else bookmarkedIds + tip.id
+                                },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isSaved) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                                    contentDescription = "Save",
+                                    tint = if (isSaved) Color(0xFF58A6FF) else Color(0xFF8B949E),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(text = tip.summary, fontSize = 12.sp, color = Color(0xFF8B949E))
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFF1F6FEB).copy(alpha = 0.15f)
+                        ) {
+                            Text(
+                                text = "★ ${tip.impact}",
+                                color = Color(0xFF58A6FF),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+
+                        AnimatedVisibility(visible = isExpanded) {
+                            Column(modifier = Modifier.padding(top = 12.dp)) {
+                                Divider(color = Color(0xFF30363D), thickness = 1.dp)
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = "UK Practice Guidance & Statute:",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 12.sp,
+                                    color = Color(0xFF2EA043)
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = tip.deepDive,
+                                    fontSize = 12.sp,
+                                    lineHeight = 18.sp,
+                                    color = Color(0xFFC9D1D9)
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-// -------------------------------------------------------------
-// TAB 4: UK Double-Entry Cheatsheet (FRS 102/105)
-// -------------------------------------------------------------
 @Composable
-fun UKCheatsheetView() {
+fun UKCheatsheetView(report: BalanceSheetReport) {
+    val dynamicJournals = remember(report) {
+        UKReportAnalysisEngine.generateDynamicJournalEntries(report)
+    }
+
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("UK DOUBLE-ENTRY CHEATSHEET", fontSize = 18.sp, fontWeight = FontWeight.Black, color = Color(0xFF2EA043))
-        Text("Standard journal entries conforming to UK FRS 102 / FRS 105 principles.", fontSize = 12.sp, color = Color(0xFF8B949E))
+        Text("DOUBLE-ENTRY CHEATSHEET & FIXES", fontSize = 18.sp, fontWeight = FontWeight.Black, color = Color(0xFF2EA043))
+        Text("Customized journal entries matching your balance sheet figures.", fontSize = 12.sp, color = Color(0xFF8B949E))
         Spacer(modifier = Modifier.height(14.dp))
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            items(AccountancyRepository.cheatSheet) { entry ->
+            items(dynamicJournals) { entry ->
                 Card(
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF161B22)),
-                    modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFF30363D), RoundedCornerShape(12.dp))
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(
+                            1.dp,
+                            if (entry.isSuggestedForReport) Color(0xFF1F6FEB) else Color(0xFF30363D),
+                            RoundedCornerShape(12.dp)
+                        )
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
+                        if (entry.isSuggestedForReport) {
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF1F6FEB).copy(alpha = 0.2f),
+                                modifier = Modifier.padding(bottom = 6.dp)
+                            ) {
+                                Text(
+                                    text = "★ ${entry.suggestedContext.uppercase()}",
+                                    color = Color(0xFF58A6FF),
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
                         Text(entry.transaction, fontWeight = FontWeight.Bold, color = Color(0xFFF0F6FC), fontSize = 14.sp)
                         Spacer(modifier = Modifier.height(6.dp))
                         Row(Modifier.fillMaxWidth()) {
