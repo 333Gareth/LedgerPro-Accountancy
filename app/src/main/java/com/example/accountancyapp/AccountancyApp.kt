@@ -37,10 +37,10 @@ import java.util.Locale
 import kotlin.math.abs
 
 enum class DocumentImportType(val label: String, val hint: String, val icon: ImageVector) {
-    AUTO("Auto-Detect / Combined", "Best for mixed packs & general ledger reports", Icons.Default.AutoAwesome),
-    TRIAL_BALANCE("Trial Balance (TB)", "Reads Account Codes, Debit & Credit columns", Icons.Default.TableView),
-    PROFIT_AND_LOSS("Profit & Loss (P&L)", "Extracts Turnover, Overheads & PBT for tax", Icons.Default.ReceiptLong),
-    BALANCE_SHEET("Balance Sheet (BS)", "Extracts Assets, Debtors, Creditors & Equity", Icons.Default.AccountBalance)
+    AUTO("Smart Auto-Detect", "Auto-maps Xero, Sage, QuickBooks & standard reports", Icons.Default.AutoAwesome),
+    TRIAL_BALANCE("Trial Balance (TB)", "Reads Debit & Credit nominal columns accurately", Icons.Default.TableView),
+    PROFIT_AND_LOSS("Profit & Loss (P&L)", "Extracts Turnover, Cost of Sales, Overheads & PBT", Icons.Default.ReceiptLong),
+    BALANCE_SHEET("Balance Sheet (BS)", "Maps Assets, Debtors, Creditors & Equity balances", Icons.Default.AccountBalance)
 }
 
 enum class TipCategory(val title: String, val icon: ImageVector) {
@@ -96,7 +96,8 @@ data class BalanceSheetReport(
     val shareholderFunds: Double = 0.0,
     val turnover: Double = 0.0,
     val netProfitBeforeTax: Double = 0.0,
-    val rawFileName: String = "UK FRS Sample"
+    val rawFileName: String = "UK FRS Sample",
+    val extractedLinesCount: Int = 0
 )
 
 data class FinancialHealthMetric(
@@ -164,8 +165,8 @@ object AccountancyRepository {
         AccountancyTip(
             id = 6,
             title = "Companies House Audit Exemption Thresholds",
-            summary = "Verify your small company eligibility under Section 477 of the Companies Act 2006.",
-            deepDive = "A private limited company in the UK is exempt from statutory audit if it satisfies at least 2 of 3 conditions: Annual Turnover ≤ £15m (for periods beginning on/after 6 April 2025; £10.2m previously), Balance Sheet Total ≤ £7.5m (formerly £5.1m), and average employees ≤ 50.",
+            summary = "Verify small company eligibility under Section 477 of Companies Act 2006.",
+            deepDive = "A private limited company in the UK is exempt from statutory audit if it satisfies at least 2 of 3 conditions: Annual Turnover ≤ £15m, Balance Sheet Total ≤ £7.5m, and average employees ≤ 50.",
             category = TipCategory.PRO,
             impact = "Saves £5,000 - £15,000 in External Audit Fees",
             triggerCondition = { report -> report.turnover in 1.0..15000000.0 && report.totalAssets in 1.0..7500000.0 }
@@ -232,10 +233,7 @@ object AccountancyRepository {
 object UKReportAnalysisEngine {
 
     /**
-     * Calculates UK Corporation Tax using HMRC rate bands:
-     * - Profit <= £50k: 19% (Small profits rate)
-     * - Profit >= £250k: 25% (Main rate)
-     * - £50k - £250k: 25% minus Marginal Relief using fraction 3/200: (3/200) * (£250,000 - Profit)
+     * Calculates UK Corporation Tax using HMRC rate bands & statutory 3/200 marginal relief formula.
      */
     fun calculateCorporationTax(profit: Double): Double {
         if (profit <= 0.0) return 0.0
@@ -251,9 +249,9 @@ object UKReportAnalysisEngine {
     }
 
     /**
-     * Helper to split CSV or TSV lines while respecting quotation marks (e.g. "26,000.00").
+     * Splits CSV, TSV, or semicolon-delimited lines with full quotation mark resilience.
      */
-    private fun parseCsvLine(line: String): List<String> {
+    fun parseDelimitedLine(line: String): List<String> {
         val tokens = mutableListOf<String>()
         val sb = StringBuilder()
         var inQuotes = false
@@ -261,11 +259,7 @@ object UKReportAnalysisEngine {
         for (char in line) {
             when {
                 char == '\"' -> inQuotes = !inQuotes
-                char == ',' && !inQuotes -> {
-                    tokens.add(sb.toString().trim())
-                    sb.clear()
-                }
-                char == '\t' && !inQuotes -> {
+                (char == ',' || char == '\t' || char == ';') && !inQuotes -> {
                     tokens.add(sb.toString().trim())
                     sb.clear()
                 }
@@ -277,13 +271,28 @@ object UKReportAnalysisEngine {
     }
 
     /**
-     * Cleans string currency amounts: strips '£', '$', commas, whitespace, and handles brackets for negatives: (1,500) -> -1500
+     * Robust currency & number parser.
+     * Strips currency symbols (GBP, £, $, €), handles accounting brackets `(1,250.00)` -> -1250.00,
+     * dashes `--`, and trailing credit/debit indicators `1500.00 CR`.
      */
-    private fun parseAmount(raw: String): Double? {
-        var str = raw.trim().replace("£", "").replace("$", "").replace("€", "").trim()
-        if (str.isEmpty() || str == "-" || str == "--") return null
+    fun parseAmount(raw: String): Double? {
+        var str = raw.trim()
+            .replace("GBP", "", ignoreCase = true)
+            .replace("£", "")
+            .replace("$", "")
+            .replace("€", "")
+            .trim()
+
+        if (str.isEmpty() || str == "-" || str == "--" || str == "N/A" || str == "nil") return null
 
         var isNegative = false
+        if (str.endsWith("CR", ignoreCase = true)) {
+            // In trial balances credit can be negative for assets/expenses or normal for income/liabilities
+            str = str.substring(0, str.length - 2).trim()
+        } else if (str.endsWith("DR", ignoreCase = true)) {
+            str = str.substring(0, str.length - 2).trim()
+        }
+
         if (str.startsWith("(") && str.endsWith(")")) {
             isNegative = true
             str = str.substring(1, str.length - 1).trim()
@@ -291,13 +300,17 @@ object UKReportAnalysisEngine {
             isNegative = true
             str = str.substring(1).trim()
         }
-        str = str.replace(",", "").trim()
+
+        str = str.replace(",", "").replace(" ", "").trim()
         val num = str.toDoubleOrNull() ?: return null
         return if (isNegative) -abs(num) else num
     }
 
     /**
-     * Multi-format report parser supporting document-type targeted mapping.
+     * Advanced Multi-Document Parser:
+     * - Disregards subtotal/grand-total lines to avoid double-counting.
+     * - Detects Trial Balance Debit/Credit column layouts.
+     * - Recognizes Xero, Sage, QuickBooks, and FreeAgent chart of accounts.
      */
     fun parseReportText(
         rawText: String,
@@ -307,147 +320,217 @@ object UKReportAnalysisEngine {
         var cash = 0.0
         var debtors = 0.0
         var stock = 0.0
-        var curAssets = 0.0
-        var totalAssets = 0.0
-        var curCreditors = 0.0
-        var ltCreditors = 0.0
-        var totalCreditors = 0.0
+        var explicitCurrentAssets = 0.0
+        var explicitTotalAssets = 0.0
+        var currentCreditors = 0.0
+        var longTermCreditors = 0.0
+        var explicitTotalCreditors = 0.0
         var equity = 0.0
         var turnover = 0.0
-        var netProfit = 0.0
+        var explicitPbt = 0.0
         var totalExpenses = 0.0
+        var parsedLineCount = 0
+
+        // Column Index Detection for structured reports (Trial Balance / Ledgers)
+        var debitColIdx = -1
+        var creditColIdx = -1
+        var balanceColIdx = -1
 
         val lines = rawText.lines().map { it.trim() }.filter { it.isNotEmpty() }
 
         for (line in lines) {
-            // Standard Key-Value parsing
-            if (line.contains(":") || line.contains("=")) {
+            // 1. Check for column headers in Trial Balance
+            val headerTokens = parseDelimitedLine(line).map { it.lowercase() }
+            if (headerTokens.any { it.contains("debit") || it.contains("credit") || it.contains("balance") }) {
+                headerTokens.forEachIndexed { idx, token ->
+                    if (token.contains("debit") && !token.contains("credit")) debitColIdx = idx
+                    if (token.contains("credit")) creditColIdx = idx
+                    if (token.contains("balance") || token.contains("net") || token.contains("ytd")) balanceColIdx = idx
+                }
+                continue
+            }
+
+            // 2. Key-Value style parsing: "Turnover: £450,000" or "Cash at bank = 52,000"
+            if (line.contains(":") || (line.contains("=") && !line.contains("=="))) {
                 val parts = line.split(Regex("[:=]"), 2)
                 if (parts.size == 2) {
-                    val key = parts[0].trim().lowercase()
+                    val label = parts[0].trim().lowercase()
                     val value = parseAmount(parts[1]) ?: 0.0
+                    parsedLineCount++
 
                     when {
-                        key.contains("cash") || key.contains("bank") -> cash = value
-                        key.contains("debtor") || key.contains("receivable") || key.contains("trade debtor") -> debtors = value
-                        key.contains("stock") || key.contains("inventor") -> stock = value
-                        key.contains("current asset") -> curAssets = value
-                        key.contains("total asset") -> totalAssets = value
-                        (key.contains("creditor") && key.contains("within")) || key.contains("current liabilit") -> curCreditors = value
-                        (key.contains("creditor") && key.contains("after")) || key.contains("long-term") || key.contains("long term") -> ltCreditors = value
-                        key.contains("total creditor") || key.contains("total liabilit") -> totalCreditors = value
-                        key.contains("shareholder") || key.contains("equity") || key.contains("capital") -> equity = value
-                        key.contains("turnover") || key.contains("revenue") || key.contains("sales") || key.contains("billings") -> turnover = value
-                        key.contains("profit before tax") || key.contains("net profit") || key.contains("net income") || key.contains("pbt") -> netProfit = value
-                        key.contains("expense") || key.contains("overhead") || key.contains("cost of sale") -> totalExpenses += value
+                        // Turnover / Revenue
+                        label.contains("turnover") || label.contains("revenue") || label.contains("sales") || label.contains("fee income") -> {
+                            if (docType != DocumentImportType.BALANCE_SHEET) turnover = abs(value)
+                        }
+                        // Profit Before Tax
+                        label.contains("profit before tax") || label.contains("pbt") || label.contains("net profit before") -> {
+                            if (docType != DocumentImportType.BALANCE_SHEET) explicitPbt = value
+                        }
+                        // Operating Profit / Net Income
+                        (label.contains("net profit") || label.contains("net income") || label.contains("operating profit")) && explicitPbt == 0.0 -> {
+                            if (docType != DocumentImportType.BALANCE_SHEET) explicitPbt = value
+                        }
+                        // Cash & Bank
+                        label.contains("cash") || label.contains("bank") || label.contains("current account") || label.contains("treasury") -> {
+                            if (docType != DocumentImportType.PROFIT_AND_LOSS) cash = abs(value)
+                        }
+                        // Trade Debtors
+                        label.contains("debtor") || label.contains("receivable") || label.contains("trade debtor") -> {
+                            if (docType != DocumentImportType.PROFIT_AND_LOSS) debtors = abs(value)
+                        }
+                        // Stock / Inventory
+                        label.contains("stock") || label.contains("inventory") || label.contains("work in progress") || label.contains("raw material") -> {
+                            if (docType != DocumentImportType.PROFIT_AND_LOSS) stock = abs(value)
+                        }
+                        // Current Assets Total
+                        label.contains("total current asset") || label.contains("current asset") -> {
+                            if (docType != DocumentImportType.PROFIT_AND_LOSS) explicitCurrentAssets = abs(value)
+                        }
+                        // Total Assets
+                        label.contains("total asset") -> {
+                            if (docType != DocumentImportType.PROFIT_AND_LOSS) explicitTotalAssets = abs(value)
+                        }
+                        // Current Creditors (< 1 year)
+                        (label.contains("creditor") && (label.contains("within") || label.contains("one year") || label.contains("< 1"))) ||
+                                label.contains("current liabilit") || label.contains("trade payable") -> {
+                            if (docType != DocumentImportType.PROFIT_AND_LOSS) currentCreditors = abs(value)
+                        }
+                        // Long-Term Creditors (> 1 year)
+                        (label.contains("creditor") && (label.contains("after") || label.contains("more than") || label.contains("> 1"))) ||
+                                label.contains("long-term") || label.contains("non-current liabilit") || label.contains("bank loan") -> {
+                            if (docType != DocumentImportType.PROFIT_AND_LOSS) longTermCreditors = abs(value)
+                        }
+                        // Total Creditors
+                        label.contains("total creditor") || label.contains("total liabilit") -> {
+                            if (docType != DocumentImportType.PROFIT_AND_LOSS) explicitTotalCreditors = abs(value)
+                        }
+                        // Shareholder Funds / Equity
+                        label.contains("shareholder") || label.contains("equity") || label.contains("retained earning") || label.contains("capital and reserve") -> {
+                            if (docType != DocumentImportType.PROFIT_AND_LOSS) equity = abs(value)
+                        }
+                        // Expenses / Overheads
+                        label.contains("overhead") || label.contains("expense") || label.contains("cost of sale") || label.contains("admin cost") -> {
+                            if (docType != DocumentImportType.BALANCE_SHEET) totalExpenses += abs(value)
+                        }
                     }
                     continue
                 }
             }
 
-            // Tabular / Trial Balance parsing
-            val tokens = parseCsvLine(line)
+            // 3. Tabular parsing (CSV, TSV, or spaced table lines)
+            val tokens = parseDelimitedLine(line)
             if (tokens.size >= 2) {
-                val amountsWithIndices = tokens.mapIndexedNotNull { index, token ->
-                    parseAmount(token)?.let { index to it }
+                // Find all numeric columns with their index
+                val numericEntries = tokens.mapIndexedNotNull { index, tok ->
+                    parseAmount(tok)?.let { index to it }
                 }
 
-                if (amountsWithIndices.isEmpty()) continue
+                if (numericEntries.isEmpty()) continue
 
-                val description = tokens
-                    .filterIndexed { idx, _ -> amountsWithIndices.none { it.first == idx } }
-                    .joinToString(" ")
-                    .lowercase()
+                // Extract description from non-numeric columns
+                val descTokens = tokens.filterIndexed { index, _ -> numericEntries.none { it.first == index } }
+                val desc = descTokens.joinToString(" ").lowercase().trim()
 
-                val highestAmount = amountsWithIndices.maxByOrNull { abs(it.second) }?.second ?: 0.0
-                val absVal = abs(highestAmount)
+                // Skip header repetitions or grand summary lines that would double-count
+                if (desc.isEmpty() || desc == "total" || desc.startsWith("total for") || desc.contains("subtotal")) {
+                    continue
+                }
 
-                val isTurnoverRow = description.contains("turnover") ||
-                        description.contains("sales") ||
-                        description.contains("revenue") ||
-                        description.contains("fee income") ||
-                        description.contains("billings") ||
-                        line.startsWith("200 ") || line.startsWith("260 ") ||
-                        Regex("^4[0-9]{3}\\b").containsMatchIn(line)
+                parsedLineCount++
 
-                val isPbtRow = description.contains("profit before tax") ||
-                        description.contains("net profit") ||
-                        description.contains("operating profit") ||
-                        description.contains("pbt")
+                // Determine row amount: If Credit/Debit columns were detected, use them; otherwise use highest valid amount
+                val amount = when {
+                    creditColIdx >= 0 && numericEntries.any { it.first == creditColIdx } -> {
+                        numericEntries.first { it.first == creditColIdx }.second
+                    }
+                    debitColIdx >= 0 && numericEntries.any { it.first == debitColIdx } -> {
+                        numericEntries.first { it.first == debitColIdx }.second
+                    }
+                    balanceColIdx >= 0 && numericEntries.any { it.first == balanceColIdx } -> {
+                        numericEntries.first { it.first == balanceColIdx }.second
+                    }
+                    else -> {
+                        // Exclude potential account codes (e.g. 200, 4000, 7500) if a real balance follows
+                        val nonCodeAmounts = numericEntries.filter { !(it.first == 0 && abs(it.second) in 100.0..9999.0 && numericEntries.size > 1) }
+                        if (nonCodeAmounts.isNotEmpty()) {
+                            nonCodeAmounts.maxByOrNull { abs(it.second) }?.second ?: 0.0
+                        } else {
+                            numericEntries.maxByOrNull { abs(it.second) }?.second ?: 0.0
+                        }
+                    }
+                }
 
-                val isExpenseRow = description.contains("expense") ||
-                        description.contains("wages") ||
-                        description.contains("salaries") ||
-                        description.contains("cost of sales") ||
-                        description.contains("rent") ||
-                        description.contains("overheads") ||
-                        description.contains("depreciation")
+                val absAmt = abs(amount)
+                if (absAmt == 0.0) continue
+
+                // UK Account code identification (Xero: 200 Sales, 400 Advertising, etc.; Sage: 4000 Sales, 1200 Bank)
+                val isTurnoverCode = line.startsWith("200 ") || line.startsWith("200,") || line.startsWith("260 ") || Regex("^4[0-9]{3}\\b").containsMatchIn(line)
+                val isTurnoverDesc = desc.contains("turnover") || desc.contains("sales") || desc.contains("revenue") || desc.contains("fee income") || desc.contains("billings")
+
+                val isPbtDesc = desc.contains("profit before tax") || desc.contains("pbt")
+                val isExpenseDesc = desc.contains("expense") || desc.contains("cost of sale") || desc.contains("wages") ||
+                        desc.contains("salaries") || desc.contains("rent") || desc.contains("advertising") ||
+                        desc.contains("utilities") || desc.contains("insurance") || desc.contains("motor")
 
                 when {
-                    (docType != DocumentImportType.BALANCE_SHEET) && isTurnoverRow -> {
-                        if (absVal > 50.0) turnover += absVal
+                    (docType != DocumentImportType.BALANCE_SHEET) && (isTurnoverCode || isTurnoverDesc) -> {
+                        turnover += absAmt
                     }
-                    (docType != DocumentImportType.BALANCE_SHEET) && isPbtRow -> {
-                        netProfit = highestAmount
+                    (docType != DocumentImportType.BALANCE_SHEET) && isPbtDesc -> {
+                        explicitPbt = amount
                     }
-                    (docType != DocumentImportType.BALANCE_SHEET) && isExpenseRow -> {
-                        totalExpenses += absVal
+                    (docType != DocumentImportType.BALANCE_SHEET) && isExpenseDesc -> {
+                        totalExpenses += absAmt
                     }
-                    (docType != DocumentImportType.PROFIT_AND_LOSS) && (description.contains("cash") || description.contains("bank") || description.contains("current account")) -> {
-                        cash += absVal
+                    (docType != DocumentImportType.PROFIT_AND_LOSS) && (desc.contains("cash") || desc.contains("bank") || desc.contains("current account") || line.startsWith("1200 ")) -> {
+                        cash += absAmt
                     }
-                    (docType != DocumentImportType.PROFIT_AND_LOSS) && (description.contains("debtor") || description.contains("receivable") || description.contains("trade debtor")) -> {
-                        debtors += absVal
+                    (docType != DocumentImportType.PROFIT_AND_LOSS) && (desc.contains("debtor") || desc.contains("receivable") || desc.contains("trade debtor") || line.startsWith("1100 ")) -> {
+                        debtors += absAmt
                     }
-                    (docType != DocumentImportType.PROFIT_AND_LOSS) && (description.contains("stock") || description.contains("inventory") || description.contains("raw materials")) -> {
-                        stock += absVal
+                    (docType != DocumentImportType.PROFIT_AND_LOSS) && (desc.contains("stock") || desc.contains("inventory") || line.startsWith("1000 ")) -> {
+                        stock += absAmt
                     }
-                    (docType != DocumentImportType.PROFIT_AND_LOSS) && description.contains("current asset") -> {
-                        curAssets = absVal
+                    (docType != DocumentImportType.PROFIT_AND_LOSS) && desc.contains("total current asset") -> {
+                        explicitCurrentAssets = absAmt
                     }
-                    (docType != DocumentImportType.PROFIT_AND_LOSS) && description.contains("total asset") -> {
-                        totalAssets = absVal
+                    (docType != DocumentImportType.PROFIT_AND_LOSS) && desc.contains("total asset") -> {
+                        explicitTotalAssets = absAmt
                     }
-                    (docType != DocumentImportType.PROFIT_AND_LOSS) && ((description.contains("creditor") && description.contains("within")) || description.contains("trade creditor") || description.contains("accounts payable")) -> {
-                        curCreditors += absVal
+                    (docType != DocumentImportType.PROFIT_AND_LOSS) && ((desc.contains("creditor") && (desc.contains("within") || desc.contains("< 1"))) || desc.contains("trade payable") || desc.contains("trade creditor") || line.startsWith("2100 ")) -> {
+                        currentCreditors += absAmt
                     }
-                    (docType != DocumentImportType.PROFIT_AND_LOSS) && ((description.contains("creditor") && description.contains("after")) || description.contains("bank loan") || description.contains("long-term")) -> {
-                        ltCreditors += absVal
+                    (docType != DocumentImportType.PROFIT_AND_LOSS) && ((desc.contains("creditor") && (desc.contains("after") || desc.contains("> 1"))) || desc.contains("bank loan") || desc.contains("long term")) -> {
+                        longTermCreditors += absAmt
                     }
-                    (docType != DocumentImportType.PROFIT_AND_LOSS) && (description.contains("shareholder") || description.contains("retained earning") || description.contains("share capital")) -> {
-                        equity += absVal
+                    (docType != DocumentImportType.PROFIT_AND_LOSS) && (desc.contains("shareholder") || desc.contains("retained earning") || desc.contains("share capital") || line.startsWith("3000 ")) -> {
+                        equity += absAmt
                     }
                 }
             }
         }
 
-        // Auto-reconciliation
-        if (curAssets == 0.0 && (cash > 0 || debtors > 0 || stock > 0)) {
-            curAssets = cash + debtors + stock
-        }
-        if (totalAssets == 0.0 && curAssets > 0) {
-            totalAssets = curAssets
-        }
-        if (totalCreditors == 0.0 && (curCreditors > 0 || ltCreditors > 0)) {
-            totalCreditors = curCreditors + ltCreditors
-        }
-        if (netProfit == 0.0 && turnover > 0.0 && totalExpenses > 0.0) {
-            netProfit = turnover - totalExpenses
-        }
+        // Automatic Reconciliation & Totals Resolution
+        val computedCurrentAssets = if (explicitCurrentAssets > 0.0) explicitCurrentAssets else (cash + debtors + stock)
+        val computedTotalAssets = if (explicitTotalAssets > 0.0) explicitTotalAssets else computedCurrentAssets
+        val computedTotalCreditors = if (explicitTotalCreditors > 0.0) explicitTotalCreditors else (currentCreditors + longTermCreditors)
+        val finalPbt = if (explicitPbt != 0.0) explicitPbt else if (turnover > 0 && totalExpenses > 0) (turnover - totalExpenses) else 0.0
 
         return BalanceSheetReport(
             cashAtBank = cash,
             tradeDebtors = debtors,
             stockInventory = stock,
-            currentAssets = curAssets,
-            totalAssets = totalAssets,
-            creditorsDueWithinOneYear = curCreditors,
-            creditorsDueAfterOneYear = ltCreditors,
-            totalCreditors = totalCreditors,
+            currentAssets = computedCurrentAssets,
+            totalAssets = computedTotalAssets,
+            creditorsDueWithinOneYear = currentCreditors,
+            creditorsDueAfterOneYear = longTermCreditors,
+            totalCreditors = computedTotalCreditors,
             shareholderFunds = equity,
             turnover = turnover,
-            netProfitBeforeTax = netProfit,
-            rawFileName = sourceName
+            netProfitBeforeTax = finalPbt,
+            rawFileName = sourceName,
+            extractedLinesCount = parsedLineCount
         )
     }
 
@@ -597,9 +680,6 @@ object UKReportAnalysisEngine {
         return adviceList
     }
 
-    /**
-     * Generates a concrete, dynamic Action Checklist tailored directly to the uploaded balance sheet numbers.
-     */
     fun generateTasks(report: BalanceSheetReport): List<ActionTask> {
         val tasks = mutableListOf<ActionTask>()
 
@@ -709,13 +789,9 @@ object UKReportAnalysisEngine {
         return tasks
     }
 
-    /**
-     * Dynamically generates customized journal entries that directly incorporate the numbers from the uploaded balance sheet!
-     */
     fun generateDynamicJournalEntries(report: BalanceSheetReport): List<CheatSheetEntry> {
         val dynamicList = mutableListOf<CheatSheetEntry>()
 
-        // 1. Corporation Tax Accrual Journal
         if (report.netProfitBeforeTax > 0) {
             val estimatedCT = calculateCorporationTax(report.netProfitBeforeTax)
             dynamicList.add(
@@ -731,7 +807,6 @@ object UKReportAnalysisEngine {
             )
         }
 
-        // 2. Bad Debt Provision on Large Debtors Book
         if (report.tradeDebtors > 25000.0) {
             val provisionAmt = report.tradeDebtors * 0.05
             dynamicList.add(
@@ -747,7 +822,6 @@ object UKReportAnalysisEngine {
             )
         }
 
-        // 3. Stock Write Down to NRV
         if (report.stockInventory > 30000.0) {
             val writeDownAmt = report.stockInventory * 0.08
             dynamicList.add(
@@ -763,7 +837,6 @@ object UKReportAnalysisEngine {
             )
         }
 
-        // 4. Working Capital Loan Reclassification
         if (report.creditorsDueWithinOneYear > 100000.0) {
             dynamicList.add(
                 CheatSheetEntry(
@@ -778,7 +851,6 @@ object UKReportAnalysisEngine {
             )
         }
 
-        // Append standard cheat-sheet items
         dynamicList.addAll(AccountancyRepository.getStandardCheatSheet())
         return dynamicList
     }
@@ -809,31 +881,32 @@ fun UKAccountancyAppScreen() {
     var selectedTab by remember { mutableStateOf(0) }
     var selectedDocType by remember { mutableStateOf(DocumentImportType.AUTO) }
 
-    // Central shared balance sheet state driving all tabs
+    // Central shared financial statement state driving all tabs
     var rawInputText by remember {
         mutableStateOf(
             """
-Cash at Bank: £55,000
-Trade Debtors: £82,000
-Stock: £40,000
-Current Assets: £177,000
-Total Assets: £340,000
-Creditors Due Within One Year: £115,000
-Creditors Due After One Year: £75,000
-Total Creditors: £190,000
-Shareholder Funds: £150,000
-Turnover: £520,000
-Profit Before Tax: £65,000
+Account,Debit,Credit
+200 - Sales / Turnover,,520000.00
+Cost of Sales / Overheads,455000.00,
+1200 - Current Bank Account,55000.00,
+1100 - Trade Debtors Book,82000.00,
+1000 - Stock Inventory,40000.00,
+Total Current Assets,177000.00,
+Total Tangible Assets,340000.00,
+2100 - Creditors Due Within 1 Year,,115000.00
+Bank Loan Due After 1 Year,,75000.00
+3000 - Shareholder Reserves / Equity,,150000.00
+Profit Before Tax (PBT),,65000.00
             """.trimIndent()
         )
     }
 
     var report by remember {
-        mutableStateOf(UKReportAnalysisEngine.parseReportText(rawInputText, "UK FRS Sample", selectedDocType))
+        mutableStateOf(UKReportAnalysisEngine.parseReportText(rawInputText, "UK Standard Trial Balance", selectedDocType))
     }
-    var importedFileName by remember { mutableStateOf("UK FRS Sample") }
+    var importedFileName by remember { mutableStateOf("UK Standard Trial Balance") }
 
-    // Synchronized active tasks generated from the balance sheet
+    // Synchronized action tasks
     var activeTasks by remember { mutableStateOf(UKReportAnalysisEngine.generateTasks(report)) }
 
     LaunchedEffect(report) {
@@ -970,13 +1043,13 @@ fun ActiveReportTopBanner(
                 )
                 Column {
                     Text(
-                        text = "ACTIVE REPORT: ${sourceName.take(20)}",
+                        text = "ACTIVE REPORT: ${sourceName.take(24)}",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFFF0F6FC)
                     )
                     Text(
-                        text = "Turnover: £%,.0f  •  PBT: £%,.0f".format(Locale.UK, report.turnover, report.netProfitBeforeTax),
+                        text = "Turnover: £%,.0f  •  PBT: £%,.0f  •  Lines Read: %d".format(Locale.UK, report.turnover, report.netProfitBeforeTax, report.extractedLinesCount),
                         fontSize = 10.sp,
                         color = Color(0xFF8B949E)
                     )
@@ -1005,6 +1078,15 @@ fun UKReportImportAuditView(
 ) {
     val context = LocalContext.current
     var showManualEdit by remember { mutableStateOf(false) }
+    var showFieldAdjuster by remember { mutableStateOf(false) }
+
+    // Direct Field Overrides State
+    var editTurnover by remember(report) { mutableStateOf(report.turnover.toLong().toString()) }
+    var editPbt by remember(report) { mutableStateOf(report.netProfitBeforeTax.toLong().toString()) }
+    var editCash by remember(report) { mutableStateOf(report.cashAtBank.toLong().toString()) }
+    var editDebtors by remember(report) { mutableStateOf(report.tradeDebtors.toLong().toString()) }
+    var editStock by remember(report) { mutableStateOf(report.stockInventory.toLong().toString()) }
+    var editCreditors by remember(report) { mutableStateOf(report.creditorsDueWithinOneYear.toLong().toString()) }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -1014,7 +1096,7 @@ fun UKReportImportAuditView(
                 context.contentResolver.openInputStream(it)?.use { stream ->
                     val reader = BufferedReader(InputStreamReader(stream))
                     val content = reader.readText()
-                    val fileName = it.lastPathSegment ?: "Imported UK File"
+                    val fileName = it.lastPathSegment?.substringAfterLast('/') ?: "Imported UK File"
                     val parsed = UKReportAnalysisEngine.parseReportText(content, fileName, selectedDocType)
                     onUpdateReport(parsed, content, fileName)
                 }
@@ -1043,7 +1125,7 @@ fun UKReportImportAuditView(
                     letterSpacing = 1.2.sp
                 )
                 Text(
-                    text = "Select your document type for tailored extraction into tax, tasks, and advisory.",
+                    text = "Smart extraction engine for Xero, Sage, QuickBooks, and FRS CSV/TSV statements.",
                     fontSize = 11.sp,
                     color = Color(0xFF8B949E)
                 )
@@ -1085,7 +1167,7 @@ fun UKReportImportAuditView(
             }
         }
 
-        // Action Buttons
+        // Action Buttons: Import, Quick Override, Paste
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1103,37 +1185,151 @@ fun UKReportImportAuditView(
                 }
 
                 OutlinedButton(
-                    onClick = { showManualEdit = !showManualEdit },
+                    onClick = { showFieldAdjuster = !showFieldAdjuster },
                     shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFC9D1D9)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF58A6FF)),
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(if (showManualEdit) Icons.Default.Close else Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text(if (showManualEdit) "Close Input" else "Paste / Edit", fontSize = 12.sp)
+                    Text(if (showFieldAdjuster) "Close Values" else "Edit Figures", fontSize = 12.sp)
+                }
+            }
+        }
+
+        // Live Manual Field Adjuster (Allows direct overrides if an accounting export has custom headers)
+        if (showFieldAdjuster) {
+            item {
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF161B22)),
+                    modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFF58A6FF).copy(alpha = 0.5f), RoundedCornerShape(14.dp))
+                ) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("MANUAL REPORT FIELD OVERRIDE", fontSize = 11.sp, fontWeight = FontWeight.Black, color = Color(0xFF58A6FF))
+                            Text("Live Synced", fontSize = 10.sp, color = Color(0xFF2EA043))
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = editTurnover,
+                                onValueChange = { editTurnover = it },
+                                label = { Text("Turnover (£)") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
+                            )
+                            OutlinedTextField(
+                                value = editPbt,
+                                onValueChange = { editPbt = it },
+                                label = { Text("PBT (£)") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
+                            )
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = editCash,
+                                onValueChange = { editCash = it },
+                                label = { Text("Cash (£)") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
+                            )
+                            OutlinedTextField(
+                                value = editDebtors,
+                                onValueChange = { editDebtors = it },
+                                label = { Text("Debtors (£)") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
+                            )
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = editStock,
+                                onValueChange = { editStock = it },
+                                label = { Text("Stock (£)") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
+                            )
+                            OutlinedTextField(
+                                value = editCreditors,
+                                onValueChange = { editCreditors = it },
+                                label = { Text("Creditors <1yr (£)") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                val t = editTurnover.toDoubleOrNull() ?: report.turnover
+                                val p = editPbt.toDoubleOrNull() ?: report.netProfitBeforeTax
+                                val c = editCash.toDoubleOrNull() ?: report.cashAtBank
+                                val d = editDebtors.toDoubleOrNull() ?: report.tradeDebtors
+                                val s = editStock.toDoubleOrNull() ?: report.stockInventory
+                                val cr = editCreditors.toDoubleOrNull() ?: report.creditorsDueWithinOneYear
+
+                                val updatedCurrentAssets = c + d + s
+                                val updatedTotalAssets = if (report.totalAssets > updatedCurrentAssets) report.totalAssets else updatedCurrentAssets
+                                val updatedCreditors = cr + report.creditorsDueAfterOneYear
+
+                                val updatedReport = report.copy(
+                                    turnover = t,
+                                    netProfitBeforeTax = p,
+                                    cashAtBank = c,
+                                    tradeDebtors = d,
+                                    stockInventory = s,
+                                    currentAssets = updatedCurrentAssets,
+                                    totalAssets = updatedTotalAssets,
+                                    creditorsDueWithinOneYear = cr,
+                                    totalCreditors = updatedCreditors,
+                                    rawFileName = "${report.rawFileName} (Adjusted)"
+                                )
+                                onUpdateReport(updatedReport, rawInputText, updatedReport.rawFileName)
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1F6FEB)),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Apply Adjustments to All Tabs", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
         }
 
         // Quick Preset Templates
         item {
-            Text("Sample UK Scenarios:", fontSize = 11.sp, color = Color(0xFF8B949E), fontWeight = FontWeight.Bold)
+            Text("Sample UK Accounting Scenarios:", fontSize = 11.sp, color = Color(0xFF8B949E), fontWeight = FontWeight.Bold)
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 item {
                     AssistChip(
                         onClick = {
                             val raw = """
-Cash at Bank: £140,000
-Trade Debtors: £60,000
-Stock: £0
-Current Assets: £200,000
-Total Assets: £280,000
-Creditors Due Within One Year: £45,000
-Creditors Due After One Year: £20,000
-Total Creditors: £65,000
-Shareholder Funds: £215,000
-Turnover: £750,000
-Profit Before Tax: £180,000
+Account,Debit,Credit
+200 - Sales / Turnover,,750000.00
+Cost of Sales / Overheads,570000.00,
+1200 - Cash at Bank,140000.00,
+1100 - Trade Debtors,60000.00,
+1000 - Stock,0.00,
+Total Current Assets,200000.00,
+Total Tangible Assets,280000.00,
+2100 - Creditors < 1 Year,,45000.00
+Bank Loan > 1 Year,,20000.00
+3000 - Shareholder Reserves,,215000.00
+Profit Before Tax,,180000.00
                             """.trimIndent()
                             val name = "UK Tech Ltd (£180k PBT)"
                             onUpdateReport(UKReportAnalysisEngine.parseReportText(raw, name, selectedDocType), raw, name)
@@ -1145,17 +1341,18 @@ Profit Before Tax: £180,000
                     AssistChip(
                         onClick = {
                             val raw = """
-Cash at Bank: £8,000
-Trade Debtors: £95,000
-Stock: £160,000
-Current Assets: £263,000
-Total Assets: £380,000
-Creditors Due Within One Year: £280,000
-Creditors Due After One Year: £90,000
-Total Creditors: £370,000
-Shareholder Funds: £10,000
-Turnover: £600,000
-Profit Before Tax: -£25,000
+Account,Debit,Credit
+200 - Sales / Turnover,,600000.00
+Overheads & Cost of Sales,625000.00,
+1200 - Bank Current Account,8000.00,
+1100 - Aged Trade Debtors,95000.00,
+1000 - Stock Inventory,160000.00,
+Total Current Assets,263000.00,
+Total Assets,380000.00,
+2100 - Creditors < 1 Year,,280000.00
+Creditors > 1 Year,,90000.00
+Share Capital & Equity,,10000.00
+Profit Before Tax,,-25000.00
                             """.trimIndent()
                             val name = "Distressed UK Retail"
                             onUpdateReport(UKReportAnalysisEngine.parseReportText(raw, name, selectedDocType), raw, name)
@@ -1167,6 +1364,8 @@ Profit Before Tax: -£25,000
                     AssistChip(
                         onClick = {
                             val raw = """
+Turnover: £350,000
+Profit Before Tax: £32,000
 Cash at Bank: £45,000
 Trade Debtors: £35,000
 Stock: £50,000
@@ -1176,50 +1375,12 @@ Creditors Due Within One Year: £90,000
 Creditors Due After One Year: £50,000
 Total Creditors: £140,000
 Shareholder Funds: £110,000
-Turnover: £350,000
-Profit Before Tax: £32,000
                             """.trimIndent()
                             val name = "Imbalanced UK Audit"
                             onUpdateReport(UKReportAnalysisEngine.parseReportText(raw, name, selectedDocType), raw, name)
                         },
                         label = { Text("Imbalanced Audit", fontSize = 11.sp) }
                     )
-                }
-            }
-        }
-
-        // Raw Editor
-        if (showManualEdit) {
-            item {
-                Card(
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF161B22)),
-                    modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFF30363D), RoundedCornerShape(12.dp))
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(
-                            text = "Raw Ledger / Document Input:",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF58A6FF)
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        OutlinedTextField(
-                            value = rawInputText,
-                            onValueChange = {
-                                onUpdateReport(UKReportAnalysisEngine.parseReportText(it, "Manual Input", selectedDocType), it, "Manual Input")
-                            },
-                            modifier = Modifier.fillMaxWidth().height(150.dp),
-                            shape = RoundedCornerShape(8.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color(0xFFC9D1D9),
-                                focusedBorderColor = Color(0xFF2EA043),
-                                unfocusedBorderColor = Color(0xFF30363D)
-                            ),
-                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
-                        )
-                    }
                 }
             }
         }
@@ -1232,21 +1393,43 @@ Profit Before Tax: £32,000
                 modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFF30363D), RoundedCornerShape(14.dp))
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("PARSED BALANCE SHEET (GBP)", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("EXTRACTED FINANCIAL FIGURES (GBP)", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                        Surface(shape = RoundedCornerShape(4.dp), color = Color(0xFF2EA043).copy(alpha = 0.2f)) {
+                            Text("${report.extractedLinesCount} Lines Parsed", color = Color(0xFF2EA043), fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                        }
+                    }
+
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Total Assets:", color = Color(0xFF8B949E), fontSize = 13.sp)
-                        Text(String.format(Locale.UK, "£%,.0f", report.totalAssets), color = Color(0xFF2EA043), fontWeight = FontWeight.Bold)
+                        Text("Annual Turnover / Billings:", color = Color(0xFF8B949E), fontSize = 13.sp)
+                        Text(String.format(Locale.UK, "£%,.0f", report.turnover), color = Color(0xFF2EA043), fontWeight = FontWeight.Bold)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Current Assets (Bank + Debtors + Stock):", color = Color(0xFF8B949E), fontSize = 13.sp)
+                        Text("Trading Profit Before Tax (PBT):", color = Color(0xFF8B949E), fontSize = 13.sp)
+                        Text(String.format(Locale.UK, "£%,.0f", report.netProfitBeforeTax), color = if (report.netProfitBeforeTax >= 0) Color(0xFF58A6FF) else Color(0xFFF85149), fontWeight = FontWeight.Bold)
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Cash at Bank & Treasury:", color = Color(0xFF8B949E), fontSize = 13.sp)
+                        Text(String.format(Locale.UK, "£%,.0f", report.cashAtBank), color = Color.White, fontWeight = FontWeight.SemiBold)
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Trade Debtors (Receivables):", color = Color(0xFF8B949E), fontSize = 13.sp)
+                        Text(String.format(Locale.UK, "£%,.0f", report.tradeDebtors), color = Color.White, fontWeight = FontWeight.SemiBold)
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Current Assets (Cash+Debtors+Stock):", color = Color(0xFF8B949E), fontSize = 13.sp)
                         Text(String.format(Locale.UK, "£%,.0f", report.currentAssets), color = Color.White, fontWeight = FontWeight.SemiBold)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Creditors Due (< 1yr + > 1yr):", color = Color(0xFF8B949E), fontSize = 13.sp)
-                        Text(String.format(Locale.UK, "£%,.0f", report.totalCreditors), color = Color(0xFFF85149), fontWeight = FontWeight.SemiBold)
+                        Text("Creditors Due (< 1yr):", color = Color(0xFF8B949E), fontSize = 13.sp)
+                        Text(String.format(Locale.UK, "£%,.0f", report.creditorsDueWithinOneYear), color = Color(0xFFF85149), fontWeight = FontWeight.SemiBold)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Shareholder Funds (Capital & Reserves):", color = Color(0xFF8B949E), fontSize = 13.sp)
+                        Text("Shareholder Funds / Reserves:", color = Color(0xFF8B949E), fontSize = 13.sp)
                         Text(String.format(Locale.UK, "£%,.0f", report.shareholderFunds), color = Color(0xFF58A6FF), fontWeight = FontWeight.SemiBold)
                     }
                 }
@@ -1314,7 +1497,7 @@ Profit Before Tax: £32,000
             }
         }
 
-        // Advisory Section
+        // Statutory Advisory Section
         item {
             Spacer(Modifier.height(4.dp))
             Text("STATUTORY ADVISORY & COMPLIANCE FINDINGS", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF2EA043), letterSpacing = 1.sp)
@@ -1499,7 +1682,6 @@ fun UKTaxCalculatorView(report: BalanceSheetReport) {
     }
     var vatRateSelection by remember { mutableStateOf(20) }
 
-    // Synchronize inputs whenever the parent active report updates (from upload, CSV import, or presets)
     LaunchedEffect(report) {
         if (report.turnover > 0) {
             turnoverInput = report.turnover.toLong().toString()
@@ -1537,14 +1719,14 @@ fun UKTaxCalculatorView(report: BalanceSheetReport) {
                     letterSpacing = 1.sp
                 )
                 Text(
-                    text = "Tax computation dynamically connected to your uploaded balance sheet.",
+                    text = "Tax computation dynamically connected to your uploaded statement.",
                     fontSize = 12.sp,
                     color = Color(0xFF8B949E)
                 )
             }
         }
 
-        // Live connection indicator & reset button
+        // Live connection indicator & re-sync button
         item {
             Surface(
                 shape = RoundedCornerShape(12.dp),
@@ -1982,7 +2164,7 @@ fun UKCheatsheetView(report: BalanceSheetReport) {
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text("DOUBLE-ENTRY CHEATSHEET & FIXES", fontSize = 18.sp, fontWeight = FontWeight.Black, color = Color(0xFF2EA043))
-        Text("Customized journal entries matching your balance sheet figures.", fontSize = 12.sp, color = Color(0xFF8B949E))
+        Text("Customized journal entries matching your statement figures.", fontSize = 12.sp, color = Color(0xFF8B949E))
         Spacer(modifier = Modifier.height(14.dp))
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
