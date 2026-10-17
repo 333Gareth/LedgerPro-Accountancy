@@ -1303,12 +1303,25 @@ fun UKActionTasksView(
 
 @Composable
 fun UKTaxCalculatorView(report: BalanceSheetReport) {
-    var turnoverInput by remember(report) { mutableStateOf(if (report.turnover > 0) report.turnover.toInt().toString() else "") }
-    var allowableExpensesInput by remember(report) {
+    var turnoverInput by remember {
+        mutableStateOf(if (report.turnover > 0) report.turnover.toLong().toString() else "")
+    }
+    var allowableExpensesInput by remember {
         val calculatedExpenses = (report.turnover - report.netProfitBeforeTax).coerceAtLeast(0.0)
-        mutableStateOf(if (calculatedExpenses > 0) calculatedExpenses.toInt().toString() else "")
+        mutableStateOf(if (calculatedExpenses > 0) calculatedExpenses.toLong().toString() else "")
     }
     var vatRateSelection by remember { mutableStateOf(20) }
+
+    // Synchronize inputs whenever the parent active report updates (from upload, CSV import, or presets)
+    LaunchedEffect(report) {
+        if (report.turnover > 0) {
+            turnoverInput = report.turnover.toLong().toString()
+        }
+        val calculatedExpenses = (report.turnover - report.netProfitBeforeTax).coerceAtLeast(0.0)
+        if (calculatedExpenses > 0 || report.netProfitBeforeTax != 0.0) {
+            allowableExpensesInput = calculatedExpenses.toLong().toString()
+        }
+    }
 
     val turnover = turnoverInput.toDoubleOrNull() ?: 0.0
     val expenses = allowableExpensesInput.toDoubleOrNull() ?: 0.0
@@ -1329,8 +1342,79 @@ fun UKTaxCalculatorView(report: BalanceSheetReport) {
     ) {
         item {
             Column {
-                Text("HMRC CORPORATION TAX & VAT", fontSize = 18.sp, fontWeight = FontWeight.Black, color = Color(0xFF2EA043))
-                Text("Figures automatically synchronized with your active balance sheet.", fontSize = 12.sp, color = Color(0xFF8B949E))
+                Text(
+                    text = "HMRC CORPORATION TAX & VAT",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Black,
+                    color = Color(0xFF2EA043),
+                    letterSpacing = 1.sp
+                )
+                Text(
+                    text = "Tax computation dynamically connected to your uploaded balance sheet.",
+                    fontSize = 12.sp,
+                    color = Color(0xFF8B949E)
+                )
+            }
+        }
+
+        // Live connection indicator & reset button
+        item {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Color(0xFF161B22),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, Color(0xFF30363D), RoundedCornerShape(12.dp))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF2EA043))
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "LINKED: ${report.rawFileName}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFF0F6FC)
+                            )
+                        }
+                        Text(
+                            text = "Report Turnover: £%,.0f  •  PBT: £%,.0f".format(
+                                Locale.UK,
+                                report.turnover,
+                                report.netProfitBeforeTax
+                            ),
+                            fontSize = 11.sp,
+                            color = Color(0xFF8B949E)
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            turnoverInput = if (report.turnover > 0) report.turnover.toLong().toString() else "0"
+                            val exp = (report.turnover - report.netProfitBeforeTax).coerceAtLeast(0.0)
+                            allowableExpensesInput = exp.toLong().toString()
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF58A6FF)),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Re-Sync", fontSize = 11.sp)
+                    }
+                }
             }
         }
 
@@ -1339,17 +1423,27 @@ fun UKTaxCalculatorView(report: BalanceSheetReport) {
                 Surface(
                     shape = RoundedCornerShape(10.dp),
                     color = Color(0xFFD29922).copy(alpha = 0.15f),
-                    modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFFD29922), RoundedCornerShape(10.dp))
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Color(0xFFD29922), RoundedCornerShape(10.dp))
                 ) {
-                    Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFFD29922), modifier = Modifier.size(20.dp))
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = Color(0xFFD29922),
+                            modifier = Modifier.size(22.dp)
+                        )
                         Spacer(Modifier.width(10.dp))
                         Text(
-                            text = "26.5% MARGINAL RELIEF BAND ACTIVE: Every extra £1 of allowable expense (pension, AIA plant/machinery) saves 26.5p in tax!",
+                            text = "26.5% MARGINAL RELIEF BAND ACTIVE: Profits sit between £50,000 and £250,000. Every extra £1 of allowable expense or pension contribution saves 26.5p in Corporation Tax!",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFFE3B341),
-                            lineHeight = 15.sp
+                            lineHeight = 16.sp
                         )
                     }
                 }
@@ -1361,9 +1455,16 @@ fun UKTaxCalculatorView(report: BalanceSheetReport) {
                 value = turnoverInput,
                 onValueChange = { turnoverInput = it },
                 label = { Text("Annual Turnover / Billings (£)") },
+                placeholder = { Text("e.g. 520000") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(10.dp)
+                shape = RoundedCornerShape(10.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color(0xFFC9D1D9),
+                    focusedBorderColor = Color(0xFF2EA043),
+                    unfocusedBorderColor = Color(0xFF30363D)
+                )
             )
         }
 
@@ -1371,16 +1472,32 @@ fun UKTaxCalculatorView(report: BalanceSheetReport) {
             OutlinedTextField(
                 value = allowableExpensesInput,
                 onValueChange = { allowableExpensesInput = it },
-                label = { Text("Allowable Business Expenses & AIA (£)") },
+                label = { Text("Allowable Business Expenses & AIA Deductions (£)") },
+                placeholder = { Text("e.g. 455000") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(10.dp)
+                shape = RoundedCornerShape(10.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color(0xFFC9D1D9),
+                    focusedBorderColor = Color(0xFF2EA043),
+                    unfocusedBorderColor = Color(0xFF30363D)
+                )
             )
         }
 
         item {
-            Text("VAT Rate Selection:", fontSize = 12.sp, color = Color(0xFF8B949E), fontWeight = FontWeight.Bold)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            Text(
+                text = "VAT Rate Applied to Turnover:",
+                fontSize = 12.sp,
+                color = Color(0xFF8B949E),
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(4.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 listOf(20 to "Standard 20%", 5 to "Reduced 5%", 0 to "Zero-Rated 0%").forEach { (rate, label) ->
                     FilterChip(
                         selected = vatRateSelection == rate,
@@ -1399,17 +1516,38 @@ fun UKTaxCalculatorView(report: BalanceSheetReport) {
             Card(
                 shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF161B22)),
-                modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFF30363D), RoundedCornerShape(14.dp))
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, Color(0xFF30363D), RoundedCornerShape(14.dp))
             ) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "HMRC CT600 TAX COMPUTATION SUMMARY",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF8B949E),
+                        letterSpacing = 1.sp
+                    )
+
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Taxable Trading Profit:", color = Color(0xFF8B949E), fontSize = 13.sp)
-                        Text(String.format(Locale.UK, "£%,.2f", taxableProfit), color = Color.White, fontWeight = FontWeight.Bold)
+                        Text(
+                            String.format(Locale.UK, "£%,.2f", taxableProfit),
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
 
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("UK Corporation Tax (CT600):", color = Color(0xFFF85149), fontSize = 13.sp)
-                        Text(String.format(Locale.UK, "-£%,.2f", corpTax), color = Color(0xFFF85149), fontWeight = FontWeight.Bold)
+                        Text("UK Corporation Tax Payable:", color = Color(0xFFF85149), fontSize = 13.sp)
+                        Text(
+                            String.format(Locale.UK, "-£%,.2f", corpTax),
+                            color = Color(0xFFF85149),
+                            fontWeight = FontWeight.Bold
+                        )
                     }
 
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -1429,13 +1567,31 @@ fun UKTaxCalculatorView(report: BalanceSheetReport) {
                     Divider(color = Color(0xFF30363D))
 
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Retained Distributable Reserves:", color = Color(0xFF2EA043), fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                        Text(String.format(Locale.UK, "£%,.2f", retainedProfit), color = Color(0xFF2EA043), fontSize = 15.sp, fontWeight = FontWeight.Black)
+                        Text(
+                            text = "Retained Distributable Reserves:",
+                            color = Color(0xFF2EA043),
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = String.format(Locale.UK, "£%,.2f", retainedProfit),
+                            color = Color(0xFF2EA043),
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Black
+                        )
                     }
 
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Est. Output VAT (${vatRateSelection}%):", color = Color(0xFFD29922), fontSize = 13.sp)
-                        Text(String.format(Locale.UK, "£%,.2f", estimatedOutputVAT), color = Color(0xFFD29922), fontWeight = FontWeight.Bold)
+                        Text(
+                            text = "Est. Output VAT (${vatRateSelection}%):",
+                            color = Color(0xFFD29922),
+                            fontSize = 13.sp
+                        )
+                        Text(
+                            text = String.format(Locale.UK, "£%,.2f", estimatedOutputVAT),
+                            color = Color(0xFFD29922),
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }
