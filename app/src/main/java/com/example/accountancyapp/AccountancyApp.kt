@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.sp
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.Locale
+import kotlin.math.abs
 
 enum class TipCategory(val title: String, val icon: ImageVector) {
     ALL("All Tips", Icons.Default.AllInclusive),
